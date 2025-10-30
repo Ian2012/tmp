@@ -1,0 +1,50 @@
+---
+- name: Recreate OVS external bridges
+  hosts: all
+  become: true
+  vars:
+    container_names_without_dpdk: "openvswitch_db"
+    container_names_with_dpdk: "ovsdpdk_db"
+  tasks:
+    - name: Check for OVS instalation type
+      community.docker.docker_container_info:
+        name: "{{ container_names_without_dpdk }}"
+      register: ovs_container_info
+
+    - name: Define OVS instalation type and container names
+      ansible.builtin.set_fact:
+        recreate_case: "{{ 'OVS' if ovs_container_info.exists else 'OVSDPDK' }}"
+        container_name: "{{ container_names_without_dpdk if ovs_container_info.exists else container_names_with_dpdk }}"
+
+    - name: Generate Docker command for listing external bridges
+      ansible.builtin.set_fact:
+        list_br_command: docker exec {{ container_name }} ovs-vsctl list-br
+
+    - name: List external bridges
+      ansible.builtin.shell:
+        cmd: "set -o pipefail && {{ list_br_command }} | grep br-ex"
+        executable: /bin/bash
+      register: external_bridges
+      changed_when: false
+
+    - name: Delete external OVS bridges
+      ansible.builtin.command: docker exec {{ container_name }} bash -c "ovs-vsctl del-br {{ item }}"
+      loop: "{{ external_bridges.stdout_lines }}"
+      changed_when: true
+
+    - name: Create external OVSDPDK bridges
+      ansible.builtin.command: >
+        docker exec {{ container_name }} bash -c "CONFIG_FILE=/var/lib/kolla/config_files/ovs-dpdkctl.conf
+        /var/lib/kolla/config_files/ovs-dpdkctl.sh init"
+      changed_when: true
+      when: recreate_case == 'OVSDPDK'
+
+    - name: Create external OVS bridges
+      ansible.builtin.shell:
+        cmd: >
+          set -o pipefail && docker exec openvswitch_db ovs-vsctl list-ports {{ item }} |
+          xargs docker exec {{ container_name }} /usr/local/bin/kolla_ensure_openvswitch_configured {{ item }}
+        executable: /bin/bash
+      loop: "{{ external_bridges.stdout_lines }}"
+      changed_when: true
+      when: recreate_case == 'OVS'

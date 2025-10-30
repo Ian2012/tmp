@@ -1,0 +1,11 @@
+{
+    "command": "/usr/lib/frr/docker-start",
+    "config_files": [
+        {
+            "source": "{{ container_config_directory }}/frr.conf",
+            "dest": "/etc/frr/frr.conf",
+            "owner": "root",
+            "perm": "0600"
+        }
+    ]
+}

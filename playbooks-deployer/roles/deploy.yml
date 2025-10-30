@@ -1,0 +1,5 @@
+---
+- import_playbook: "/runner/project/playbooks-upstream/kolla-ansible/ansible/site.yml"
+  vars:
+    kolla_action: deploy
+...

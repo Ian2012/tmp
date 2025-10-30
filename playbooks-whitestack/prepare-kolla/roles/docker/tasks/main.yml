@@ -1,0 +1,33 @@
+---
+- name: Remove old Docker versions
+  ansible.builtin.apt:
+    name: "{{ docker_apt_remove_old }}"
+    state: absent
+
+- name: Load aufs module
+  community.general.modprobe:
+    name: aufs
+    state: present
+  ignore_errors: true
+  register: load_aufs
+
+- name: Remove old Docker files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  with_items:
+    - /etc/default/docker
+    - /etc/init/docker.conf
+    - /etc/init.d/docker
+    - /var/lib/docker/aufs
+
+- name: Install Docker dependencies
+  ansible.builtin.apt:
+    name: "{{ docker_apt_dependencies }}"
+    state: present
+    update_cache: true
+    lock_timeout: "{{ apt_lock_timeout }}"
+  register: apt_install
+  retries: "{{ apt_retries_amount }}"
+  delay: "{{ apt_retries_delay }}"
+  until: apt_install is success

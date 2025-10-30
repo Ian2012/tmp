@@ -1,0 +1,78 @@
+---
+- name: Restart OVS
+  hosts: all
+  become: true
+  vars:
+    dpdk_service_name: ovs-dpdkctl
+    container_names_without_dpdk:
+      - openvswitch_vswitchd
+      - openvswitch_db
+    container_names_with_dpdk:
+      - ovsdpdk_vswitchd
+      - ovsdpdk_db
+  tasks:
+    - name: Check for OVS instalation type
+      community.docker.docker_container_info:
+        name: "{{ container_names_without_dpdk[0] }}"
+      register: ovs_container_info
+
+    - name: Define OVS instalation type and container names
+      ansible.builtin.set_fact:
+        restart_case: "{{ 'OVS' if ovs_container_info.exists else 'OVSDPDK' }}"
+        container_names: "{{ container_names_without_dpdk if ovs_container_info.exists else container_names_with_dpdk }}"
+
+    - name: Generate Docker command for listing containers
+      ansible.builtin.set_fact:
+        docker_command: "docker ps -a -q {{ container_names | map('regex_replace', '^(.+)$', '-f name=\\1') | join(' ') }}"
+
+    - name: List containers
+      ansible.builtin.command: "{{ docker_command }}"
+      register: result
+      changed_when: false
+
+    - name: Check that required containers exists
+      ansible.builtin.assert:
+        that: "{{ result.stdout_lines | length == container_names | length }}"
+        msg: Required container does not exists on host
+
+    - name: Stop containers
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: stopped
+        comparisons:
+          '*': ignore
+      loop: "{{ container_names }}"
+
+    - name: Stop DPDK service
+      ansible.builtin.systemd:
+        name: "{{ dpdk_service_name }}"
+        state: stopped
+      when: restart_case == 'OVSDPDK'
+
+    - name: Wait for containers to stop
+      ansible.builtin.shell: >
+        while [[
+        $(docker ps -q
+        -f "status=exited"
+        -f name='"{{ item }}"') == "" ]]; do
+        echo "Waiting for container to stop...";
+        sleep 1;
+        done
+      async: 10
+      poll: 1
+      loop: "{{ container_names }}"
+      changed_when: false
+
+    - name: Start DPDK service
+      ansible.builtin.systemd:
+        name: "{{ dpdk_service_name }}"
+        state: started
+      when: restart_case == 'OVSDPDK'
+
+    - name: Start containers
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: started
+        comparisons:
+          '*': ignore
+      loop: "{{ container_names | reverse }}"

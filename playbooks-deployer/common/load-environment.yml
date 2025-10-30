@@ -1,0 +1,51 @@
+---
+- name: Set up local environment
+  hosts: localhost
+  gather_facts: false
+  become: true
+  vars:
+    config_repo_path: "{{ hostvars['localhost']['config_repo_path'] }}"
+  tasks:
+    - name: Create required directories locally
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/whitecloud/config/certificates
+        - /etc/kolla/certificates
+      check_mode: false
+
+    - name: Copy certificates to /etc/whitecloud/config
+      ansible.builtin.copy:
+        src: "{{ config_repo_path }}/config/certificates/"
+        dest: /etc/whitecloud/config/certificates/
+        mode: preserve
+      check_mode: false
+
+    - name: Copy certificates to /etc/kolla
+      ansible.builtin.copy:
+        src: "{{ config_repo_path }}/config/certificates/"
+        dest: /etc/kolla/certificates/
+        mode: preserve
+      check_mode: false
+
+- name: Load and distribute WhiteCloud configuration
+  hosts: localhost,all
+  gather_facts: false
+  tasks:
+    - name: Read awx_inventory.yml from control node
+      ansible.builtin.slurp:
+        src: "{{ config_repo_path }}/awx_inventory.yml"
+      register: awx_inventory_content
+      delegate_to: localhost
+      run_once: true
+      ignore_errors: true
+      check_mode: false
+
+    - name: Set all globals variables dynamically from awx_inventory.yml
+      ansible.builtin.set_fact:
+        "{{ item.key }}": "{{ item.value }}"
+      loop: "{{ (((awx_inventory_content.content | b64decode | from_yaml).all.vars) | dict2items) }}"
+      when: awx_inventory_content.content is defined
+      check_mode: false

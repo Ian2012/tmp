@@ -1,0 +1,126 @@
+---
+- name: Destroy nodes
+  hosts: compute
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  environment:
+    OS_PROJECT_DOMAIN_NAME: "{{ os_project_domain_name }}"
+    OS_USER_DOMAIN_NAME: "{{ os_auth.domain_name }}"
+    OS_PROJECT_NAME: "{{ os_auth.project_name }}"
+    OS_USERNAME: "{{ os_auth.username }}"
+    OS_TENANT_NAME: "{{ os_tenant }}"
+    OS_PASSWORD: "{{ os_auth.password }}"
+    OS_AUTH_URL: "{{ os_auth.auth_url }}"
+    OS_INTERFACE: "{{ os_interface }}"
+    OS_ENDPOINT_TYPE: "{{ os_endpoint_type }}"
+    OS_IDENTITY_API_VERSION: "{{ os_identity_api_version }}"
+    OS_REGION_NAME: "{{ os_region_name }}"
+    OS_AUTH_PLUGIN: "{{ os_plugin }}"
+  tasks:
+    - name: Check compute nodes can be destroyed
+      block:
+        - name: Search for virtual machines on host
+          delegate_to: localhost
+          connection: local
+          ansible.builtin.command: openstack server list --all --host "{{ inventory_hostname }}" -f value -c ID
+          register: servers
+          changed_when: false
+
+        - name: Check there are no virtual machines on host
+          ansible.builtin.assert:
+            that: servers.stdout == ""
+            msg: Host {{ inventory_hostname }} has virtual machines, please remove them manually
+
+        - name: Search for ports on host
+          delegate_to: localhost
+          connection: local
+          ansible.builtin.command: openstack port list --host "{{ inventory_hostname }}" -f value -c ID
+          register: result
+          changed_when: false
+
+        - name: Check there are no ports on hosts
+          ansible.builtin.assert:
+            that: result.stdout == ""
+            msg: Host {{ inventory_hostname }} have ports, please remove them manually
+
+    - name: Destroy nodes
+      block:
+        - name: Disable host from being scheduled as a compute node
+          delegate_to: localhost
+          connection: local
+          ansible.builtin.command: openstack compute service set "{{ inventory_hostname }}" nova-compute --disable
+          changed_when: true
+
+        - name: List containers
+          ansible.builtin.command: docker ps -q
+          become: true
+          register: containers
+          changed_when: false
+
+        - name: Check if openvswitch_db and ovsdpdk_db containers are running
+          community.docker.docker_container_info:
+            name: "{{ item }}"
+          ignore_errors: true
+          register: ovs_db_info
+          with_items:
+            - openvswitch_db
+            - ovsdpdk_db
+
+        - name: Remove bridges from running OVS containers
+          ansible.builtin.command: "docker exec -u root {{ item }} bash -c 'for br in `ovs-vsctl list-br`; do ovs-vsctl --if-exists del-br $br; done'"
+          changed_when: true
+          ignore_errors: true
+          register: rm_ovs
+          when: >
+            ovs_db_info.results is defined and
+            (item == 'openvswitch_db' and ovs_db_info.results[0].exists and ovs_db_info.results[0].container['State']['Running']) or
+            (item == 'ovsdpdk_db' and ovs_db_info.results[1].exists and ovs_db_info.results[1].container['State']['Running'])
+          with_items:
+            - openvswitch_db
+            - ovsdpdk_db
+
+        - name: Remove containers
+          become: true
+          community.docker.docker_container:
+            name: "{{ item }}"
+            state: absent
+            comparisons:
+              '*': ignore
+          loop: "{{ containers.stdout_lines }}"
+
+        - name: List volumes
+          ansible.builtin.command: docker volume ls -q
+          become: true
+          register: volumes
+          changed_when: false
+
+        - name: Remove volumes
+          become: true
+          community.docker.docker_volume:
+            name: "{{ item }}"
+            state: absent
+          loop: "{{ volumes.stdout_lines }}"
+
+        - name: Remove network agents on hosts
+          delegate_to: localhost
+          connection: local
+          ansible.builtin.shell: |
+            set -eu
+            for id in $(openstack network agent list --host "{{ inventory_hostname }}" -f value -c ID); do
+              openstack network agent delete "$id"
+            done
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Remove compute services on hosts
+          delegate_to: localhost
+          connection: local
+          ansible.builtin.shell: |
+            set -eu
+            for id in $(openstack compute service list --os-compute-api-version 2.53 --host "{{ inventory_hostname }}" -f value -c ID); do
+              openstack compute service delete --os-compute-api-version 2.53 $id;
+            done
+          args:
+            executable: /bin/bash
+          changed_when: true

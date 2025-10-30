@@ -1,0 +1,2 @@
+---
+- import_playbook: "/runner/project/playbooks-whitestack/post-kolla/post-kolla.yml"

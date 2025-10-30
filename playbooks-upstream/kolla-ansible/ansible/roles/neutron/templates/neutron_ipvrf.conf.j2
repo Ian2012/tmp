@@ -1,0 +1,5 @@
+{% if enable_whitesdn_plugin | bool and enable_whitesdn_l3_plugins | bool %}
+[service_providers]
+
+service_provider = L3_ROUTER_NAT:whitesdn_ipvrf_router:neutron.service_providers.whitesdn.WhiteSdnIPVRFRouter
+{% endif %}

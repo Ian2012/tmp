@@ -1,0 +1,9 @@
+---
+- name: Destroy Docker volumes
+  hosts: all
+  become: true
+  tasks:
+    - name: Delete volumes
+      ansible.builtin.file:
+        state: absent
+        path: /var/lib/docker/volumes/

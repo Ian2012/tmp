@@ -1,0 +1,27 @@
+{# The "-" in the tags are used for trimming end of lines. #}
+host,{{ grouped_versions.keys() | join(',') }},{{ version_commands.keys() | join(',') }}
+{% for aHost, hostValues in hostvars.items() %}
+  {% if "res" in hostValues.keys() %}
+  {{ aHost + "," -}}
+    {% for serviceNameGrouped, serviceVersions in grouped_versions.items() %}
+      {% if hostValues["grouped_versions"][serviceNameGrouped] | length > 0 -%}
+        {{ hostValues["grouped_versions"][serviceNameGrouped] | join('/') + ',' -}}
+      {%- else %}
+        NI,
+      {%- endif %}
+  {% endfor %}
+  {% for serviceName, serviceCommand in version_commands.items() %}
+    {% if serviceName in hostValues["res"] -%}
+      {% if hostValues["res"][serviceName] == "" -%}
+        EMPTY
+      {%- else %}
+        {{ hostValues["res"][serviceName] -}}
+      {%- endif  %}
+    {%- else %}
+      NI
+    {%- endif %}
+    {% if not loop.last -%}, {% endif %}
+  {% endfor %}
+
+{% endif %}
+{% endfor %}

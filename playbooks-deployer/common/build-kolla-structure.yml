@@ -1,0 +1,29 @@
+---
+- name: Build .kolla directory structure in AWX
+  hosts: localhost
+  gather_facts: false
+  become: true
+  vars:
+    config_repo_path: "{{ hostvars['localhost']['config_repo_path'] }}"
+  tasks:
+    - name: Create .kolla directory structure
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /etc/whitecloud/.kolla
+        - /etc/whitecloud/.kolla/config
+      check_mode: false
+
+    - name: Copy custom configuration files to .kolla/config
+      ansible.builtin.copy:
+        src: "{{ config_repo_path }}/config/"
+        dest: /etc/whitecloud/.kolla/config/
+        mode: preserve
+      check_mode: false
+      when: config_repo_path is defined
+
+    - name: Debug message
+      ansible.builtin.debug:
+        msg: ".kolla directory structure built successfully from GitLab repo configurations"

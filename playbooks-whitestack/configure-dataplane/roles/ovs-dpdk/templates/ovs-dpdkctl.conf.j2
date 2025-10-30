@@ -1,0 +1,32 @@
+{% with ovs_conf = (ovs_dpdk_conf.ovs | default({})) %}
+[ovs]
+bridge_mappings = {{ ovs_conf.bridge_mappings | default('') }}
+port_mappings = {{ ovs_conf.port_mappings | default('') }}
+cidr_mappings = {{ ovs_cidr_mappings if ovs_cidr_mappings is defined else (ovs_conf.cidr_mappings | default('')) }}
+tunnel_vlan_mappings = {{ ovs_conf.tunnel_vlan_mappings | default('') }}
+ovs_mem_channels = {{ ovs_conf.ovs_mem_channels | default('4') }}
+ovs_socket_mem = {{ ovs_conf.ovs_socket_mem | default('4096') }}
+dpdk_interface_driver = {{ ovs_conf.dpdk_interface_driver | default('uio_pci_generic') }}
+hugepage_mountpoint = {{ ovs_conf.hugepage_mountpoint | default('/dev/hugepages') }}
+physical_port_policy = {{ ovs_conf.physical_port_policy | default('named') }}
+bond_options = {{ ovs_conf.bond_options | default('bond_mode=balance-tcp lacp=active') }}
+pci_whitelist = -a {{ dpdk_pci_addresses.values() | list | select() | list | join(',') }}
+ovs_coremask = {{ ovs_core_list | get_coremask_from_cores }}
+pmd_coremask = {{ pmd_core_list | get_coremask_from_cores }}
+pmd_rxq_assign = {{ ovs_conf.pmd_rxq_assign | default('cycles') }}
+pmd_sleep_max = {{ ovs_conf.pmd_sleep_max | default('0') }}
+{% endwith %}
+
+{% for iface in (ovs_dpdk_conf.interfaces | default({})) %}
+
+[{{ iface }}]
+address = {{ dpdk_pci_addresses[iface] | default('null') }}
+driver = {{ ovs_dpdk_conf.interfaces[iface].dpdk_interface_driver  | default('null') }}
+{% if 'interface_driver' in ovs_dpdk_conf.interfaces[iface] %}
+old_driver = {{ ovs_dpdk_conf.interfaces[iface].interface_driver }}
+{% endif %}
+{% if 'members' in ovs_dpdk_conf.interfaces[iface] %}
+members = {{ ovs_dpdk_conf.interfaces[iface].members }}
+{% endif %}
+interface_extra_options = {{ ovs_dpdk_conf.interfaces[iface].interface_extra_options | default('') }}
+{% endfor %}

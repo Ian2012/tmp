@@ -1,0 +1,29 @@
+---
+- name: Restart Docker containers
+  hosts: all
+  become: true
+  vars:
+    services_list: '{{ (services | default("")).split(",") | map("trim") | reject("eq", "") }}'
+    should_restart_all: '{{ services_list | length == 0 }}'
+  tasks:
+    - name: Retrieve Docker containers
+      ansible.builtin.shell:
+        cmd: set -o pipefail && docker ps -a --format {% raw %} '{{ .ID }} {{ .Image }}' {% endraw %} | grep -v whitecloud-deployer
+        executable: /bin/bash
+      register: docker_containers
+      changed_when: false
+
+    - name: Restart Docker containers
+      community.docker.docker_container:
+        name: '{{ container_id }}'
+        image: '{{ image }}'
+        state: started
+        restart: true
+        comparisons:
+          '*': ignore
+      vars:
+        container_id: '{{ item.split() | first }}'
+        image: '{{ item.split() | last }}'
+        should_restart_this_image: '{{ services_list | select("in", image) | length > 0 }}'
+      when: should_restart_all or should_restart_this_image
+      loop: '{{ docker_containers.stdout_lines }}'

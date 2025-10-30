@@ -1,0 +1,23 @@
+---
+- name: Running Designate bootstrap container
+  vars:
+    designate_central: "{{ designate_services['designate-central'] }}"
+    cacert:
+      REQUESTS_CA_BUNDLE: "{{ openstack_cacert }}"
+    default_env:
+      KOLLA_BOOTSTRAP:
+      KOLLA_CONFIG_STRATEGY: "{{ config_strategy }}"
+  become: true
+  kolla_container:
+    action: "start_container"
+    common_options: "{{ docker_common_options }}"
+    detach: False
+    environment: "{% if openstack_cacert != '' %}{{ cacert | combine(default_env) }}{% else %}{{ default_env }}{% endif %}"
+    image: "{{ designate_central.image }}"
+    labels:
+      BOOTSTRAP:
+    name: "bootstrap_designate"
+    restart_policy: oneshot
+    volumes: "{{ designate_central.volumes | reject('equalto', '') | list }}"
+  run_once: True
+  delegate_to: "{{ groups[designate_central.group][0] }}"

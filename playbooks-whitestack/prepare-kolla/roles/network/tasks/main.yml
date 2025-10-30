@@ -1,0 +1,13 @@
+---
+- name: Check that IPv6 is enabled globally
+  block:
+    - name: Get IPv6 sysctl path
+      ansible.builtin.stat:
+        path: /proc/sys/net/ipv6/
+      register: ipv6_path
+
+    - name: Check that IPv6 is enabled
+      ansible.builtin.assert:
+        that:
+          - ipv6_path.stat.exists
+        fail_msg: "IPv6 is not enabled, check the GRUB configuration"

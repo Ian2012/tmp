@@ -1,0 +1,107 @@
+---
+#
+# This playbook iterates over the list of all docker containers in each node.
+# For each container, it queries the version of the main service running in
+# the container.
+# Notes for adding new queries:
+# - The output might have several lines.
+# - The output might be written to stderr instead of stdout.
+# - The output might contain special characters that are not seen at plain
+#   sight. See neutron_l3_agent for an example.
+# - The output might contain "," characters. We delete "," in the
+#   task Get components version.
+# - The Ansible "community.docker.docker_container_exec" module has
+#   problems with some containers: horizon, rabbitmq, keepalived and mariadb.
+#   For these containers, the execution of the command fails. In the case of
+#   keepalived, the output is written to stderr instead of stdout.
+#
+- name: Show components version
+  hosts: all
+  strategy: linear
+  vars:
+    res: {}
+    result_file: "/tmp/component_versions{{ ansible_date_time.iso8601 }}.csv"
+    docker_containers: []
+    excluded_containers:
+      - "whitecloud-deployer"
+      - "cron"
+      - "kolla_toolbox"
+      - "mariadb_clustercheck"
+    versions_to_group: ['cinder', 'heat', 'keystone', 'neutron', 'nova', 'openvswitch', 'prometheus']
+    grouped_versions: {}
+
+  handlers:
+    - name: Show CSV file path
+      ansible.builtin.debug:
+        msg: "FINISHED: The resulting CSV file is in this path: {{ result_file }}"
+
+  tasks:
+    - name: Include vars of stuff.yaml into the 'stuff' variable (2.2).
+      ansible.builtin.include_vars:
+        file: files/version_commands_variables.yaml
+        name: version_commands
+
+    - name: Retrieve Docker containers
+      community.docker.docker_host_info:
+        containers: true
+      register: docker_containers_verbose
+
+    - name: Append docker containers to list of containers
+      ansible.builtin.set_fact:
+        docker_containers: "{{ docker_containers + [item] }}"
+      loop: "{{ docker_containers_verbose.containers | map(attribute='Names') | map('first') | replace('/', '') }}"
+
+    - name: Get components version
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail && docker exec -it {{ item }} {{ version_commands[item] }} | tr -d '\n\t\r,'
+        executable: /bin/bash
+      register: component_version
+      loop: "{{ docker_containers }}"
+      when: item in version_commands.keys()
+      changed_when: false
+      ignore_errors: true
+
+    - name: Manage results
+      ansible.builtin.set_fact:
+        res: "{{ res | default({}) | combine({item.item: item.stdout}) }}"
+      loop: "{{ component_version['results'] }}"
+      when: "'stdout' in item.keys()"
+
+    - name: Concatenate component versions
+      ansible.builtin.set_fact:
+        grouped_versions: >-
+          {{
+          grouped_versions |
+            combine(
+              {item:
+                (component_version['results'] |
+                 selectattr('item', 'regex', '^' + item + '.') |
+                 map(attribute='stdout', default='NI') |
+                 unique)
+                 })
+          }}
+      loop: "{{ versions_to_group }}"
+
+    - name: Writing component version CSV file # noqa: run-once[task]
+      ansible.builtin.template:
+        src: files/component_version.csv.j2
+        dest: "{{ result_file }}"
+        mode: '0644'
+      delegate_to: localhost
+      connection: local
+      run_once: true
+      notify:
+        - Show CSV file path
+
+    - name: Testing that all containers are visited
+      ansible.builtin.debug:
+        msg: "WARNING: there is no version command for this container: {{ item }}"
+      loop: '{{ docker_containers }}'
+      when: item not in version_commands.keys() and item not in excluded_containers
+
+    - name: Testing that versions are the same
+      ansible.builtin.debug:
+        msg: "WARNING: Some {{ item }} services are in different versions: {{ grouped_versions[item] }}"
+      when: "grouped_versions[item] | length > 1"
+      loop: "{{ versions_to_group }}"

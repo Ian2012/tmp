@@ -1,0 +1,24 @@
+---
+apt_pkgs_to_remove:
+  - open-iscsi
+  - lxc
+  - lxd
+
+apt_pkgs_to_install:
+  - python3-pip
+  - crudini
+  - tzdata
+
+# Python service clients
+service_clients:
+  - python-openstackclient
+  - python-heatclient
+  - python-designateclient
+  - python-neutronclient
+  - osc-placement
+  - python-masakariclient
+
+# APT install retries
+apt_retries_amount: 5
+apt_retries_delay: 12
+apt_lock_timeout: 60

@@ -1,0 +1,383 @@
+#
+# This playbook prepares target hosts for Kolla deployment
+# It installs Python on targets if needed, before executing tasks
+# IMPORTANT!!: Customize variables for this setup at group_vars/{group}
+#
+---
+#
+# Validations
+#
+- name: Validate cloud_configuration and inventory
+  hosts: localhost
+  vars_files:
+    - vars/services.yml
+  tasks:
+    - name: Validate MariaDB nodes parity
+      ansible.builtin.assert:
+        that: groups['mariadb'] | length in [1, 3, 5]
+        msg: >-
+          mariadb nodes (inherited from control role) must be 1, 3 or 5.
+          Got {{ groups['mariadb'] | length }} instead
+          ({{ groups['mariadb'] | join(', ') }}).
+
+    - name: Validate enabled monitoring services
+      ansible.builtin.fail:
+        msg: "You must define monitoring hosts in your inventory if you enable any monitoring service in cloud_configuration!"
+      when:
+        - enabled_monitoring_services | length != 0
+        - groups['monitoring'] | length == 0
+
+    - name: Validate enabled storage services
+      ansible.builtin.fail:
+        msg: "You must define storage hosts in your inventory if you enable any storage service in cloud_configuration!"
+      when:
+        - enabled_storage_services | length != 0
+        - groups['storage'] | length == 0
+
+    - name: Validate disabled Ceilometer service
+      ansible.builtin.fail:
+        msg: "Starting with WhiteCloud Acapulco, Ceilometer service is not supported. You must disable Ceilometer to continue!"
+      when:
+        - (enable_ceilometer is defined) and (enable_ceilometer | bool)
+
+- name: Validate password consistency
+  hosts: localhost
+  tasks:
+    - name: Check if admin-openrc.sh file exists
+      ansible.builtin.stat:
+        path: /etc/whitecloud/admin-openrc.sh
+      register: admin_openrc
+
+    - name: Check if passwords.yml file exists
+      ansible.builtin.stat:
+        path: /etc/whitecloud/passwords.yml
+      register: passwords
+
+    - name: Extract admin password from admin-openrc.sh
+      ansible.builtin.shell:
+        cmd: |
+          source /etc/whitecloud/admin-openrc.sh
+          echo "$OS_PASSWORD"
+        executable: /bin/bash
+      register: admin_openrc_password
+      when: admin_openrc.stat.exists
+      changed_when: false
+
+    - name: Extract admin password from passwords.yml
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          grep '^keystone_admin_password:' /etc/whitecloud/passwords.yml | awk '{print $2}'
+        executable: /bin/bash
+      register: admin_password
+      when: passwords.stat.exists
+      changed_when: false
+
+    - name: Validate admin password consistency
+      ansible.builtin.assert:
+        that: admin_openrc_password.stdout == admin_password.stdout
+        msg: "Admin password in admin-openrc.sh and Keystone admin password in passwords.yml do not match!"
+      when: admin_openrc.stat.exists and passwords.stat.exists
+
+- name: Validate consistency in external OVS bridge naming
+  hosts: all
+  vars:
+    host_needs_switching: >-
+      {{
+      inventory_hostname in groups['compute']
+      or inventory_hostname in groups['manila-share']
+      or inventory_hostname in groups['neutron-dhcp-agent']
+      or inventory_hostname in groups['neutron-l3-agent']
+      or inventory_hostname in groups['neutron-metadata-agent']
+      or inventory_hostname in groups['ovn-controller-network']
+      }}
+    host_needs_external_network: >-
+      {{
+      inventory_hostname in groups['compute']
+      or inventory_hostname in groups['manila-share']
+      or inventory_hostname in groups['neutron-dhcp-agent']
+      or inventory_hostname in groups['neutron-l3-agent']
+      or inventory_hostname in groups['neutron-metadata-agent']
+      or inventory_hostname in groups['ovn-controller-network']
+      }}
+    bridge_name_list: "{{ neutron_bridge_name.split(',') }}"
+    matched_bridge_name_list: "{{ bridge_name_list | select('regex', '^br-ex') }}"
+    all_bridge_names_are_correct: "{{ (bridge_name_list | length) == (matched_bridge_name_list | length) }}"
+  tasks:
+    - name: Validate consistency in external OVS bridge naming
+      when: neutron_bridge_name is defined and (host_needs_switching or host_needs_external_network)
+      block:
+        - name: Check configured external bridge names are valid
+          ansible.builtin.assert:
+            that:
+              - all_bridge_names_are_correct
+              - not " " in neutron_bridge_name
+            fail_msg: "ERROR: Some bridge names do not begin with br-ex and/or contain spaces in their name. The problem is in variable: neutron_bridge_name"
+            success_msg: "SUCCESS: all bridge names are correct."
+
+#
+# TLS certificate validation
+# Variables:
+#  - validate_custom_tls_certs: whether to run or skip the tests
+#  - custom_tls_certs_valid_period: validate the certificates are valid for this number of days
+#
+- name: Validate TLS certificates
+  hosts: localhost
+  vars:
+    _kolla_internal_fqdn_cert: "/etc/whitecloud/config/certificates/haproxy-internal.pem"
+    _kolla_external_fqdn_cert: "/etc/whitecloud/config/certificates/haproxy.pem"
+    _kolla_admin_openrc_cacert: "/etc/whitecloud/config/certificates/ca/root.crt"
+    _internal_domain: "{{ kolla_internal_fqdn[kolla_internal_fqdn.index('.') + 1:] }}"
+    _external_domain: "{{ kolla_external_fqdn[kolla_external_fqdn.index('.') + 1:] }}"
+  tasks:
+    - name: Validate certificates for Internal TLS
+      when:
+        - validate_custom_tls_certs | default(True) | bool
+        - kolla_enable_tls_internal | bool
+        - kolla_internal_vip_address is defined
+        - kolla_internal_fqdn is defined
+      block:
+        # Date validation
+        - name: Test whether the Internal TLS certificate is valid for the specified time
+          community.crypto.x509_certificate_info:
+            path: "{{ _kolla_internal_fqdn_cert }}"
+            valid_at:
+              specified_time: "{{ custom_tls_certs_valid_period | default('+30d', true) }}"
+          register: internal_certificate_info
+
+        - name: Configured Internal TLS certificate dates are not valid
+          ansible.builtin.assert:
+            that: internal_certificate_info.valid_at.specified_time
+            msg: "ERROR: configured Internal TLS certificate is not valid for the specified time ({{ custom_tls_certs_valid_period | default('+30d', true) }})"
+
+        # FQDN validation
+        - name: Check internal FQDN is included in internal TLS certificate
+          ansible.builtin.assert:
+            that: internal_fqdn_included_in_internal_cert | select('true') | length > 0
+            msg: "ERROR: internal FQDN is not included in internal TLS certificate"
+          vars:
+            internal_fqdn_included_in_internal_cert:
+              - "{{ internal_certificate_info.subject.commonName == kolla_internal_fqdn }}"
+              - "{{ internal_certificate_info.subject.commonName == '*.' + _internal_domain }}"
+              - "{{ internal_certificate_info.subject_alt_name | select('regex', 'DNS:' + kolla_internal_fqdn) | length > 0 }}"
+              - "{{ internal_certificate_info.subject_alt_name | select('match', 'DNS:\\*\\.' + _internal_domain) | length > 0 }}"
+
+        # Chain validation
+        - name: Check whether chain validation is needed
+          ansible.builtin.stat:
+            path: "{{ _kolla_admin_openrc_cacert }}"
+          register: root_cert
+
+        - name: Test whether Internal TLS certificate chain is valid
+          ansible.builtin.command: openssl verify -CAfile {{ _kolla_admin_openrc_cacert }} {{ _kolla_internal_fqdn_cert }}
+          register: result_internal_chain_validation
+          ignore_errors: true
+          changed_when: false
+          when: root_cert.stat.exists
+
+        - name: Check configured internal TLS certificates dates are valid
+          ansible.builtin.assert:
+            that: result_internal_chain_validation.rc == 0
+            msg: "ERROR: configured TLS certificates chain is not valid (CA and certs do no match)"
+          when: root_cert.stat.exists
+
+    - name: Validate certificates for External TLS
+      when:
+        - validate_custom_tls_certs | default(True) | bool
+        - kolla_enable_tls_external | bool
+        - kolla_external_vip_address is defined
+        - kolla_external_fqdn is defined
+      block:
+        # Date validation
+        - name: Test whether the External TLS certificate is valid for the specified time
+          community.crypto.x509_certificate_info:
+            path: "{{ _kolla_external_fqdn_cert }}"
+            valid_at:
+              specified_time: "{{ custom_tls_certs_valid_period | default('+30d', true) }}"
+          register: external_certificate_info
+
+        - name: Check configured External TLS certificate dates are valid
+          ansible.builtin.assert:
+            that: external_certificate_info.valid_at.specified_time
+            msg: "ERROR: configured External TLS certificate is not valid for the specified time ({{ custom_tls_certs_valid_period | default('+30d', true) }})"
+
+        # FQDN validation
+        - name: External FQDN is not included in external TLS certificate
+          ansible.builtin.assert:
+            that: external_fqdn_included_in_external_cert | select('true') | length > 0
+            msg: "ERROR: external FQDN is not included in external TLS certificate"
+          vars:
+            external_fqdn_included_in_external_cert:
+              - "{{ external_certificate_info.subject.commonName == kolla_external_fqdn }}"
+              - "{{ external_certificate_info.subject.commonName == '*.' + _external_domain }}"
+              - "{{ external_certificate_info.subject_alt_name | select('regex', 'DNS:' + kolla_external_fqdn) | length > 0 }}"
+              - "{{ external_certificate_info.subject_alt_name | select('regex', 'DNS:\\*\\.' + _external_domain) | length > 0 }}"
+
+        # Chain validation
+        - name: Check whether chain validation is needed
+          ansible.builtin.stat:
+            path: "{{ _kolla_admin_openrc_cacert }}"
+          register: root_cert
+
+        - name: Test whether External TLS certificate chain is valid
+          ansible.builtin.command: openssl verify -CAfile {{ _kolla_admin_openrc_cacert }} {{ _kolla_external_fqdn_cert }}
+          register: result_external_chain_validation
+          ignore_errors: true
+          changed_when: false
+          when: root_cert.stat.exists
+
+        - name: Check configured External TLS certificates chain is valid
+          ansible.builtin.assert:
+            that: result_external_chain_validation.rc == 0
+            msg: "ERROR: configured TLS certificates chain is not valid (CA and certs do no match)"
+          when: root_cert.stat.exists
+
+#
+# Initial requirements
+#
+- name: Set up common and Docker requirements
+  hosts: all
+  gather_facts: false
+  become: true
+  pre_tasks:
+    - name: Empty docker.list file
+      ansible.builtin.copy:
+        content: ""
+        dest: /etc/apt/sources.list.d/docker.list
+        force: true
+        mode: '644'
+
+    - name: Remove APT configuration file if exists
+      ansible.builtin.file:
+        path: /etc/apt/apt.conf.d/proxy.conf
+        state: absent
+
+    - name: Remove PIP configuration file if exists
+      ansible.builtin.file:
+        path: /root/.config/pip/pip.conf
+        state: absent
+
+    - name: Add offline APT configuration
+      ansible.builtin.lineinfile:
+        path: /etc/apt/apt.conf.d/proxy.conf
+        line: "Acquire::http::Proxy \"http://{{ offline_apt_repository }}\";"
+        state: present
+        mode: '640'
+        create: true
+      when: (offline_installation is not undefined) and (offline_installation | bool) and (offline_apt_repository is not undefined)
+
+    - name: Add Docker offline APT repository to /etc/hosts
+      ansible.builtin.lineinfile:
+        dest: /etc/hosts
+        line: '{{ offline_apt_repository.split(":")[0] }} {{ docker_apt_url.split("//")[1] }}'
+      when:
+        - (offline_installation is not undefined) and (offline_installation | bool)
+        - offline_apt_repository is not undefined
+        - docker_apt_url is not undefined
+
+    - name: Add offline PIP configuration
+      ansible.builtin.blockinfile:
+        path: /root/.config/pip/pip.conf
+        block: |
+          [global]
+          index-url = http://{{ offline_pip_repository }}:{{ offline_pip_port }}{{ offline_pip_endpoint }}/simple
+          trusted-host = {{ offline_pip_repository }}
+        state: present
+        mode: '640'
+        create: true
+      when: (offline_installation is not undefined) and (offline_installation | bool) and (offline_pip_repository is not undefined)
+
+    - name: Install Python for Ansible
+      ansible.builtin.raw: test -e /usr/bin/python3 || (apt -y update && apt install -y python3-minimal)
+      changed_when: true
+
+    - name: "Ensure .ansible belongs to the ansible_user"
+      ansible.builtin.raw: >
+        if [ -f /home/{{ ansible_user }}/.ansible ]; then chown -R {{ ansible_user }}:{{ ansible_user }}
+        /home/{{ ansible_user }}/.ansible; fi
+      changed_when: true
+
+    - name: Gather facts
+      ansible.builtin.setup:
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - common
+    - docker
+
+#
+# Roles execution
+#
+- name: Set up storage node requirements
+  hosts: storage
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - storage
+
+- name: Set up network node requirements
+  hosts: network
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - network
+
+- name: Set up control node requirements
+  hosts: control
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - control
+
+- name: Set up compute node requirements
+  hosts: compute
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - compute
+
+- name: Set up FRR
+  hosts: loadbalancer
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - loadbalancer
+
+#
+# Disable IPv6
+#
+- name: Disable IPv6
+  hosts: control:network
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Set IPv6 sysctl configuration
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "{{ enable_ipv6 | ternary('0', '1') }}"
+        sysctl_set: true
+        sysctl_file: "{{ kolla_sysctl_conf_path }}"
+      with_items:
+        - "net.ipv6.conf.all.disable_ipv6"
+        - "net.ipv6.conf.default.disable_ipv6"
+      when: enable_ipv6 != None
+
+    - name: Enable IPv6 in loopback interface
+      ansible.posix.sysctl:
+        name: "net.ipv6.conf.lo.disable_ipv6"
+        value: '0'
+        sysctl_set: true
+        sysctl_file: "{{ kolla_sysctl_conf_path }}"

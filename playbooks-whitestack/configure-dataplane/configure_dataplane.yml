@@ -1,0 +1,204 @@
+---
+- name: SDN checks
+  hosts: neutron-server
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Fetching provisioned whitesdn.yaml
+      ansible.builtin.slurp:
+        src: "{{ node_config_directory }}/neutron-server/whitesdn.yaml"
+      register: remote_whitesdn_config
+      ignore_errors: true
+      when:
+        - (enable_whitesdn_plugin is defined) and (enable_whitesdn_plugin | bool)
+
+    - name: Check if the WhiteSdn config file is newer than the one provisioned
+      when:
+        - (enable_whitesdn_plugin is defined) and (enable_whitesdn_plugin | bool)
+        - remote_whitesdn_config.content is defined
+      block:
+        - name: Setting provisioned WhiteSdn variables
+          ansible.builtin.set_fact:
+            provisioned_whitesdn_config: "{{ remote_whitesdn_config.content | b64decode | from_yaml }}"
+
+        - name: Fetching whitesdn.yaml
+          ansible.builtin.set_fact:
+            whitesdn_config: "{{ lookup('file', item) | from_yaml }}"
+          with_first_found:
+            - "{{ node_custom_config }}/neutron/{{ inventory_hostname }}/whitesdn.yaml"
+            - "{{ node_custom_config }}/neutron/whitesdn.yaml"
+            - "templates/whitesdn.yaml.j2"
+
+        - name: Check if WhiteSdn configs are older than those already provisioned
+          vars:
+            current_timestamp: "{{ (whitesdn_config.generated_at if whitesdn_config.generated_at is defined else 0) }}"
+            provisioned_timestamp: "{{ (provisioned_whitesdn_config.generated_at if provisioned_whitesdn_config.generated_at is defined else 0) }}"
+          ansible.builtin.assert:
+            that:
+              - current_timestamp|int >= provisioned_timestamp|int
+            msg:
+              - "Attempting to provision a whitesdn.yaml config file older than the one already"
+              - "provisioned. Provisioned config file was generated at: {{ '%Y-%m-%d %H:%M:%S' | strftime(provisioned_timestamp) }},"
+              - "which is more recent than the current file, created at: {{ '%Y-%m-%d %H:%M:%S' | strftime(current_timestamp) }}."
+              - "(A timestamp of `1970-01-01 00:00:00` represents a config file without the `generated_at` field.)"
+
+- name: OVS/OVS-DPDK checks and tasks
+  hosts: compute:neutron
+  become: true
+  gather_facts: true
+  pre_tasks:
+    - name: Check if openvswitch_db container is running
+      community.docker.docker_container_info:
+        name: "openvswitch_db"
+      ignore_errors: true
+      register: openvswitch_db_info
+
+    - name: Ensure that the tunnel_interface is present and active if OVS containers don't exist
+      when:
+        - "(enable_openvswitch is not undefined) and (enable_openvswitch | bool)"
+        - "(enable_ovs_dpdk is undefined) or not (enable_ovs_dpdk | bool)"
+        - openvswitch_db_info.get('container') == None
+      block:
+        - name: Check that the tunnel_interface is present
+          ansible.builtin.fail:
+            msg: Please check the tunnel_interface property - interface {{ tunnel_interface }} not found
+          when: tunnel_interface not in ansible_facts.interfaces
+
+        - name: Check that the tunnel_interface is active
+          ansible.builtin.fail:
+            msg: Please check the tunnel_interface settings - interface {{ tunnel_interface | replace('-', '_') }} is not active
+          when: not hostvars[inventory_hostname].ansible_facts[tunnel_interface | replace('-', '_')]['active']
+
+    - name: Clean OVS if enabling OVS-DPDK
+      when:
+        - "('exists' in openvswitch_db_info) and openvswitch_db_info.exists and openvswitch_db_info.container['State']['Running']"
+        - "(enable_ovs_dpdk is not undefined) and (enable_ovs_dpdk | bool)"
+      block:
+        - name: Clean neutron_openvswitch_agent
+          ansible.builtin.command: "docker exec -u root neutron_openvswitch_agent neutron-ovs-cleanup --config-file /etc/neutron/neutron.conf --ovs_all_ports"
+          changed_when: true
+          ignore_errors: true
+          register: clean_neutron_ovs
+
+        - name: Remove OVS bridges
+          ansible.builtin.command: "docker exec -u root openvswitch_db bash -c 'for br in `ovs-vsctl list-br`; do ovs-vsctl --if-exists del-br $br; done'"
+          changed_when: true
+          ignore_errors: true
+          register: rm_ovs
+
+        - name: Stop OVS containers
+          community.docker.docker_container:
+            name: "{{ item }}"
+            state: absent
+            keep_volumes: false
+          with_items:
+            - "openvswitch_vswitchd"
+            - "openvswitch_db"
+            - "neutron_openvswitch_agent"
+          ignore_errors: true
+          register: stop_ovs
+
+        - name: Refresh facts
+          ansible.builtin.setup:
+
+    - name: Check if ovsdpdk_db container is running
+      community.docker.docker_container_info:
+        name: "ovsdpdk_db"
+      ignore_errors: true
+      register: ovsdpdk_db_info
+
+    - name: Ensure that the tunnel_interface is not present if OVS-DPDK containers don't exist
+      when:
+        - "(enable_openvswitch is not undefined) and (enable_openvswitch | bool)"
+        - "(enable_ovs_dpdk is not undefined) and (enable_ovs_dpdk | bool)"
+        - ovsdpdk_db_info.get('container') == None
+      block:
+        - name: Check that the tunnel_interface is not present
+          ansible.builtin.fail:
+            msg: >
+              Please check the tunnel_interface property - interface {{ tunnel_interface }} must not be present if OVS-DPDK
+              containers don't exist
+          when: tunnel_interface in ansible_facts.interfaces
+
+    - name: Clean OVS-DPDK if disabling OVS-DPDK
+      when:
+        - "('exists' in ovsdpdk_db_info) and ovsdpdk_db_info.exists and ovsdpdk_db_info.container['State']['Running']"
+        - "(enable_ovs_dpdk is undefined) or not (enable_ovs_dpdk | bool)"
+      block:
+        - name: Clean neutron_openvswitch_agent
+          ansible.builtin.command: "docker exec -u root neutron_openvswitch_agent neutron-ovs-cleanup --config-file /etc/neutron/neutron.conf --ovs_all_ports"
+          changed_when: true
+          ignore_errors: true
+          register: clean_neutron_ovs
+
+        - name: Remove OVS-DPDK bridges
+          ansible.builtin.command: "docker exec -u root ovsdpdk_db bash -c 'for br in `ovs-vsctl list-br`; do ovs-vsctl --if-exists del-br $br; done'"
+          changed_when: true
+          ignore_errors: true
+          register: rm_ovs_dpdk
+
+        - name: Stop OVS-DPDK containers
+          community.docker.docker_container:
+            name: "{{ item }}"
+            state: absent
+            keep_volumes: false
+          with_items:
+            - "ovsdpdk_vswitchd"
+            - "ovsdpdk_db"
+            - "neutron_openvswitch_agent"
+          ignore_errors: true
+          register: stop_ovs_dpdk
+
+        - name: Unbind DPDK interfaces
+          ansible.builtin.command: "{{ node_config_directory }}/ovsdpdk-db/ovs-dpdkctl.sh unbind_nics"
+          environment:
+            CONFIG_FILE: "{{ node_config_directory }}/ovsdpdk-db/ovs-dpdkctl.conf"
+          changed_when: true
+          ignore_errors: true
+          register: unbind_nics
+
+        - name: Uninstall ovs-dpdkctl service
+          ansible.builtin.command: "{{ node_config_directory }}/ovsdpdk-db/ovs-dpdkctl.sh uninstall"
+          environment:
+            CONFIG_FILE: "{{ node_config_directory }}/ovsdpdk-db/ovs-dpdkctl.conf"
+          changed_when: true
+          ignore_errors: true
+          register: rm_dpdk_svc
+
+        - name: Refresh facts
+          ansible.builtin.setup:
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - role: ovs-dpdk
+      when:
+        - "(enable_openvswitch is not undefined) and (enable_openvswitch | bool)"
+        - "(enable_ovs_dpdk is not undefined) and (enable_ovs_dpdk | bool)"
+
+- name: SR-IOV checks and tasks
+  hosts: compute
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Check if neutron_sriov_agent container is running
+      community.docker.docker_container_info:
+        name: "neutron_sriov_agent"
+      ignore_errors: true
+      register: neutron_sriov_agent_info
+
+    - name: Remove neutron_sriov_agent container if disabling SR-IOV
+      community.docker.docker_container:
+        name: "neutron_sriov_agent"
+        state: absent
+        keep_volumes: false
+      ignore_errors: true
+      register: remove_neutron_sriov_agent
+      when:
+        - "('exists' in neutron_sriov_agent_info) and neutron_sriov_agent_info.exists and neutron_sriov_agent_info.container['State']['Running']"
+        - "(enable_neutron_sriov is undefined) or not (enable_neutron_sriov | bool)"
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  roles:
+    - role: sr-iov
+      when: "(enable_neutron_sriov is not undefined) and (enable_neutron_sriov | bool)"

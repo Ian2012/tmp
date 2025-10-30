@@ -1,0 +1,25 @@
+---
+enabled_monitoring_services: "{{ monitoring_services | selectattr('enabled') | map(attribute='name') | list }}"
+
+enabled_storage_services: "{{ storage_services | selectattr('enabled') | map(attribute='name') | list }}"
+
+monitoring_services:
+  - { name: "grafana", enabled: "{{ enable_grafana is defined | bool and enable_grafana | bool }}" }
+  - { name: "influxdb", enabled: "{{ enable_influxdb is defined | bool and enable_influxdb | bool }}" }
+  - { name: "monasca", enabled: "{{ enable_monasca is defined | bool and enable_monasca | bool }}" }
+  - { name: "prometheus", enabled: "{{ enable_prometheus is defined | bool and enable_prometheus | bool }}" }
+  - { name: "prometheus-alertmanager", enabled: "{{ enable_prometheus_alertmanager is defined | bool and enable_prometheus_alertmanager | bool }}" }
+  - { name: "prometheus-blackbox-exporter",
+      enabled: "{{ enable_prometheus_blackbox_exporter is defined | bool and enable_prometheus_blackbox_exporter | bool }}" }
+  - { name: "prometheus-openstack-exporter",
+      enabled: "{{ enable_prometheus_openstack_exporter is defined | bool and enable_prometheus_openstack_exporter | bool }}" }
+  - { name: "skydive", enabled: "{{ enable_skydive is defined | bool and enable_skydive | bool }}" }
+  - { name: "storm", enabled: "{{ enable_storm is defined | bool and enable_storm | bool }}" }
+
+storage_services:
+  - { name: "cinder", enabled: "{{ enable_cinder is defined | bool and enable_cinder | bool }}" }
+  - { name: "cinder-backup", enabled: "{{ enable_cinder_backup is defined | bool and enable_cinder_backup | bool }}" }
+  - { name: "iscsid", enabled: "{{ enable_iscsid is defined | bool and enable_iscsid | bool }}" }
+  - { name: "monasca", enabled: "{{ enable_monasca is defined | bool and enable_monasca | bool }}" }
+  - { name: "multipathd", enabled: "{{ enable_multipathd is defined | bool and enable_multipathd | bool }}" }
+  - { name: "swift", enabled: "{{ enable_swift is defined | bool and enable_swift | bool }}" }

@@ -1,0 +1,299 @@
+---
+- name: Prepare environment
+  hosts: control
+  gather_facts: true
+  run_once: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python
+  environment:
+    OS_PROJECT_DOMAIN_NAME: "{{ os_project_domain_name }}"
+    OS_USER_DOMAIN_NAME: "{{ os_auth.domain_name }}"
+    OS_PROJECT_NAME: "{{ os_auth.project_name }}"
+    OS_USERNAME: "{{ os_auth.username }}"
+    OS_TENANT_NAME: "{{ os_tenant }}"
+    OS_PASSWORD: "{{ os_auth.password }}"
+    OS_AUTH_URL: "{{ os_auth.auth_url }}"
+    OS_INTERFACE: "{{ os_interface }}"
+    OS_ENDPOINT_TYPE: "{{ os_endpoint_type }}"
+    OS_IDENTITY_API_VERSION: "{{ os_identity_api_version }}"
+    OS_REGION_NAME: "{{ os_region_name }}"
+    OS_AUTH_PLUGIN: "{{ os_plugin }}"
+  tasks:
+    - name: Deployer keys
+      openstack.cloud.keypair:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        name: "{{ item.name }}"
+        state: present
+        public_key: "{{ item.public_key }}"
+        validate_certs: false
+      with_items: "{{ key_pairs }}"
+      when: not (key_pairs is undefined)
+
+    - name: Flavors
+      openstack.cloud.compute_flavor:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        flavorid: "{{ item.name | default('') }}"
+        name: "{{ item.name }}"
+        ram: "{{ item.ram }}"
+        vcpus: "{{ item.vcpus }}"
+        disk: "{{ item.disk }}"
+        ephemeral: "{{ item.ephemeral | default(0) }}"
+        swap: "{{ item.ephemeral | default(0) }}"
+        state: present
+        extra_specs: "{{ item.extra_specs | default('{}') }}"
+        validate_certs: false
+      with_items: "{{ flavors }}"
+      when: not (flavors is undefined)
+
+    ## Flavors for DPDK deployment
+    - name: DPDK flavors
+      openstack.cloud.compute_flavor:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        flavorid: "{{ 'numa.' + item.name | default('') }}"
+        name: "{{ 'numa.' + item.name }}"
+        ram: "{{ item.ram }}"
+        vcpus: "{{ item.vcpus }}"
+        disk: "{{ item.disk }}"
+        ephemeral: "{{ item.ephemeral | default(0) }}"
+        swap: "{{ item.ephemeral | default(0) }}"
+        state: present
+        extra_specs:
+          "hw:cpu_policy": 'dedicated'
+          "hw:mem_page_size": 'large'
+          "hw:numa_nodes": '1'
+        validate_certs: false
+      with_items: "{{ flavors }}"
+      when: not (flavors is undefined)
+
+    - name: Download images
+      ansible.builtin.get_url:
+        url: "{{ item.url }}"
+        dest: "/tmp/{{ item.file }}"
+        checksum: "{{ item.checksum }}"
+        mode: '644'
+      ignore_errors: true
+      with_items: "{{ images }}"
+      register: download_images
+      when: not (images is undefined)
+
+    - name: Install images
+      openstack.cloud.image:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        name: "{{ item.name }}"
+        container_format: bare
+        disk_format: qcow2
+        is_public: true
+        state: present
+        checksum: "{{ item.checksum }}"
+        filename: "/tmp/{{ item.file }}"
+        validate_certs: false
+      with_items: "{{ images }}"
+      ignore_errors: true
+      register: install_images
+      when: not (images is undefined)
+
+    - name: Public network
+      openstack.cloud.network:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        name: "{{ item.name }}"
+        provider_network_type: "{{ item.type }}"
+        provider_physical_network: "{{ item.physname }}"
+        provider_segmentation_id: "{{ item.vlan_id | default(omit) }}"
+        shared: true
+        external: true
+        state: present
+        validate_certs: false
+      with_items: "{{ public_networks }}"
+      when: not (public_networks is undefined)
+
+    - name: Public subnets
+      openstack.cloud.subnet:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        name: "{{ item.name }}"
+        network_name: "{{ item.network }}"
+        cidr: "{{ item.cidr }}"
+        enable_dhcp: "{{ item.dhcp | default('no') }}"
+        no_gateway_ip: "{{ item.disable_gateway | default('no') }}"
+        gateway_ip: "{{ item.gateway if not (item.disable_gateway | default('no') | bool) else omit }}"
+        allocation_pool_start: "{{ item.pool_start | default('') }}"
+        allocation_pool_end: "{{ item.pool_end | default('') }}"
+        state: present
+        validate_certs: false
+      with_items: "{{ public_subnets }}"
+      when: not (public_subnets is undefined)
+
+    - name: Private networks
+      openstack.cloud.network:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        name: "{{ item.name }}"
+        provider_network_type: vxlan
+        shared: true
+        external: true
+        state: present
+        validate_certs: false
+      with_items: "{{ private_networks }}"
+      when: not (private_networks is undefined)
+
+    - name: Private subnets
+      openstack.cloud.subnet:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        name: "{{ item.name }}"
+        network_name: "{{ item.network }}"
+        cidr: "{{ item.cidr }}"
+        enable_dhcp: "{{ item.dhcp | default('no') }}"
+        no_gateway_ip: "{{ item.disable_gateway | default('no') }}"
+        gateway_ip: "{{ item.gateway if not (item.disable_gateway | default('no') | bool) else omit }}"
+        allocation_pool_start: "{{ item.pool_start | default('') }}"
+        allocation_pool_end: "{{ item.pool_end | default('') }}"
+        state: present
+        validate_certs: false
+      with_items: "{{ private_subnets }}"
+      when: not (private_subnets is undefined)
+
+    - name: Routers
+      openstack.cloud.router:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        name: "{{ item.name }}"
+        network: "{{ item.network }}"
+        interfaces: "{{ item.interfaces }}"
+        state: present
+        validate_certs: false
+      with_items: "{{ routers }}"
+      when: not (routers is undefined)
+
+    - name: Create flavor_admin role
+      openstack.cloud.identity_role:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        state: present
+        name: flavor_admin
+        validate_certs: false
+
+    - name: Create onboarder role
+      openstack.cloud.identity_role:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        state: present
+        name: onboarder
+        validate_certs: false
+
+    - name: Rename port_admin role if exists
+      ansible.builtin.command: openstack role set --name allowed_pairs_admin port_admin
+      ignore_errors: true
+      register: rename_port_admin
+      changed_when: true
+
+    - name: Create allowed_pairs_admin role
+      openstack.cloud.identity_role:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        state: present
+        name: allowed_pairs_admin
+        validate_certs: false
+
+    - name: Create advsvc role
+      openstack.cloud.identity_role:
+        auth: "{{ os_auth }}"
+        interface: "{{ os_interface }}"
+        state: present
+        name: advsvc
+        validate_certs: false
+
+    - name: Create cloud-admins group
+      openstack.cloud.identity_group:
+        auth: "{{ os_auth }}"
+        state: present
+        name: "cloud-admins"
+        description: "Cloud Administrators group"
+        validate_certs: false
+
+    - name: Create cloud-operators group
+      openstack.cloud.identity_group:
+        auth: "{{ os_auth }}"
+        state: present
+        name: "cloud-operators"
+        description: "Cloud Operators group"
+        validate_certs: false
+
+    - name: Create cloud-viewers group
+      openstack.cloud.identity_group:
+        auth: "{{ os_auth }}"
+        state: present
+        name: "cloud-viewers"
+        description: "Cloud Viewers group"
+        validate_certs: false
+
+    - name: Configure VRF router resources
+      when:
+        - (enable_whitesdn_plugin is defined) and (enable_whitesdn_plugin | bool)
+        - (enable_whitesdn_l3_plugins is defined) and (enable_whitesdn_l3_plugins | bool)
+      block:
+        - name: Check if flavor profile exists
+          ansible.builtin.command: openstack network flavor profile list -f value -c id -c description
+          register: flavor_profile_check
+          changed_when: false
+          failed_when: false
+
+        - name: Set fact if flavor profile exists
+          ansible.builtin.set_fact:
+            flavor_profile_exists: "{{ 'Router VRF profile' in flavor_profile_check.stdout }}"
+          changed_when: false
+
+        - name: Create flavor profile if it does not exist
+          ansible.builtin.command: >-
+            openstack network flavor profile create --description "Router VRF profile" --enable --driver neutron.service_providers.whitesdn.WhiteSdnIPVRFRouter
+          when: not flavor_profile_exists
+          changed_when: false
+          register: flavor_profile_create_result
+
+        - name: List flavor profiles
+          ansible.builtin.command: openstack network flavor profile list -f value -c ID -c Description
+          register: flavor_profiles
+          changed_when: false
+
+        - name: Extract flavor profile ID from list
+          ansible.builtin.set_fact:
+            flavor_profile_id: >-
+              {{ flavor_profiles.stdout_lines
+                | select('search', 'Router VRF profile$')
+                | map('regex_search', '([a-f0-9-]{36})')
+                | select('string')
+                | first }}
+
+        - name: Check if flavor exists
+          ansible.builtin.command: openstack network flavor list -f value -c Name
+          register: flavor_list
+          changed_when: false
+          failed_when: false
+
+        - name: Set fact if flavor exists
+          ansible.builtin.set_fact:
+            flavor_exists: "{{ 'whitesdn_ipvrf_router' in flavor_list.stdout_lines }}"
+          changed_when: false
+
+        - name: Create flavor whitesdn_ipvrf_router if it does not exist
+          ansible.builtin.command: >-
+            openstack network flavor create
+            --service-type L3_ROUTER_NAT
+            --description "Flavor for VRF ROUTERS"
+            whitesdn_ipvrf_router
+          when: not flavor_exists
+          changed_when: false
+
+        - name: Link profile to flavor
+          ansible.builtin.command: openstack network flavor add profile whitesdn_ipvrf_router {{ flavor_profile_id }}
+          changed_when: false
+
+        - name: Ensure custom_router_admin role exists
+          openstack.cloud.identity_role:
+            name: custom_router_admin
+            state: present

@@ -1,0 +1,257 @@
+---
+#
+# Validate FRR compliance
+#
+- name: Validate FRR compliance
+  when: (enable_frr is defined) and (enable_frr | bool)
+  block:
+    - name: Validating inventory for FRR compliant configuration
+      delegate_to: localhost
+      ansible.builtin.fail:
+        msg: "You can not define hosts as compute and network at the same time if FRR is enabled!"
+      when:
+        - inventory_hostname in groups['network']
+        - inventory_hostname in groups['compute']
+        - not inventory_hostname in groups['control']
+
+    - name: Validating there are no interfaces named 'public' or 'private'
+      ansible.builtin.shell:
+        cmd: 'set -o pipefail && ip a | grep -e public: -e private: -o'
+        executable: /bin/bash
+      register: pub_priv_inter
+      failed_when: "'public' in pub_priv_inter.stdout or 'private' in pub_priv_inter.stdout"
+      changed_when: false
+
+#
+# Validate global_physnet_mtu is set
+#
+- name: Check if the global_physnet_mtu is correctly defined
+  ansible.builtin.assert:
+    that:
+      - '(global_physnet_mtu is defined) and (global_physnet_mtu | int > 0)'
+    msg: 'The variable global_physnet_mtu must be defined with a proper value'
+
+#
+# Set up password authentication for ansible_user
+#
+- name: Set up SSH for ansible_user
+  when: not (ssh_password is undefined)
+  block:
+    - name: Set user as fact
+      ansible.builtin.set_fact:
+        username: "{{ ansible_user }}"
+
+    - name: Enable SSH password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication yes'
+
+    - name: "Setting the password for {{ username }}"
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        password: "{{ ssh_password }}"
+
+    - name: Restart SSH daemon
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+#
+# Local DNS resolutions
+#
+- name: Ensure localhost in /etc/hosts
+  ansible.builtin.lineinfile:
+    dest: /etc/hosts
+    regexp: "^127.0.0.1.*"
+    line: "127.0.0.1 localhost"
+    create: true
+    mode: '644'
+    state: present
+
+- name: Add FQDNs to /etc/hosts
+  ansible.builtin.lineinfile:
+    dest: /etc/hosts
+    line: '{{ vars[item.vip_address] }} {{ vars[item.fqdn] }}'
+  when: vars[item.fqdn] is defined
+  loop:
+    - { vip_address: 'kolla_internal_vip_address', fqdn: 'kolla_internal_fqdn' }
+    - { vip_address: 'kolla_external_vip_address', fqdn: 'kolla_external_fqdn' }
+
+- name: Check if /etc/network/interfaces exists
+  ansible.builtin.stat:
+    path: '/etc/network/interfaces'
+  register: stat_result
+
+- name: Set source directory for network interfaces configurations if /etc/network/interfaces exists
+  ansible.builtin.lineinfile:
+    path: '/etc/network/interfaces'
+    regexp: '^source'
+    line: 'source /etc/network/interfaces.d/*'
+    insertbefore: BOF
+  when: stat_result.stat.exists
+
+- name: Start interfaces
+  ansible.builtin.command: ifconfig "{{ item }}" up
+  loop: "{{ unique_interface_list.split(',') }}"
+  changed_when: true
+  ignore_errors: true
+  register: start_interfaces
+  when: not (unique_interface_list is undefined)
+
+#
+# Disable libvirt (if enabled)
+#
+- name: Check if libvirt exists
+  ansible.builtin.command: systemctl status libvirt-bin
+  register: libvirt_service_status
+  changed_when: false
+  failed_when: false
+
+- name: Stop libvirt
+  when: libvirt_service_status.rc == 0
+  block:
+    - name: Stop libvirt service
+      ansible.builtin.systemd:
+        name: libvirt-bin
+        state: stopped
+        enabled: false
+      ignore_errors: true
+      register: stop_libvirt
+
+    - name: Remove libvirt apparmor
+      ansible.builtin.command: apparmor_parser -R /etc/apparmor.d/usr.sbin.libvirtd
+      changed_when: true
+
+    - name: Disable libvirt apparmor
+      ansible.builtin.command: mv /etc/apparmor.d/usr.sbin.libvirtd /etc/apparmor.d/disable/
+      changed_when: true
+
+#
+# Remove APT packages
+#
+- name: Remove specific APT packages
+  ansible.builtin.apt:
+    name: "{{ apt_pkgs_to_remove }}"
+    state: absent
+
+#
+# Install APT packages
+#
+- name: Update APT repository and install packages
+  ansible.builtin.apt:
+    name: "{{ apt_pkgs_to_install }}"
+    state: present
+    update_cache: true
+    lock_timeout: "{{ apt_lock_timeout }}"
+  register: apt_install
+  retries: "{{ apt_retries_amount }}"
+  delay: "{{ apt_retries_delay }}"
+  until: apt_install is success
+
+#
+# Install PIP packages
+#
+- name: Update PIP
+  ansible.builtin.pip:
+    executable: pip3
+    name: pip
+    state: present
+
+- name: Copy constraints file for openstack service clients dependencies
+  ansible.builtin.copy:
+    src: "/var/tmp/openstack_service_clients_constraints.txt"
+    dest: "/var/tmp/openstack_service_clients_constraints.txt"
+    mode: '644'
+
+- name: Install Python service clients
+  ansible.builtin.pip:
+    executable: pip3
+    name: "{{ item }}"
+    state: present
+    extra_args: "-c /var/tmp/openstack_service_clients_constraints.txt"
+  loop: "{{ service_clients }}"
+  register: pip_result
+  retries: 5
+  delay: 10
+  until: pip_result is succeeded
+
+- name: Install websocket-client for Python
+  ansible.builtin.pip:
+    executable: pip3
+    name: websocket-client
+  register: pip_result
+  retries: 5
+  delay: 10
+  until: pip_result is succeeded
+
+- name: Install Docker SDK for Python
+  ansible.builtin.pip:
+    executable: pip3
+    name: docker>=2.4.2
+  register: pip_result
+  retries: 5
+  delay: 10
+  until: pip_result is succeeded
+
+#
+# Nested Virtualization
+#
+- name: Enable Nested Virtualization
+  when: (not (cpu_vendor is undefined) and cpu_vendor == 'intel')
+  block:
+    - name: Remove KVM module
+      community.general.modprobe:
+        name: kvm-intel
+        state: absent
+
+    - name: Configure KVM module for Nested Virtualization
+      ansible.builtin.shell: echo 'options kvm-intel nested=y' > /etc/modprobe.d/kvm.conf
+      changed_when: true
+
+    - name: Install KVM module
+      community.general.modprobe:
+        name: kvm-intel
+        state: present
+
+#
+# Fixes mkdir /sys/kernel/config: operation not permitted
+#
+- name: Stop sys-kernel-config
+  ansible.builtin.systemd:
+    name: sys-kernel-config.mount
+    state: stopped
+
+- name: Install configfs module
+  community.general.modprobe:
+    name: configfs
+    state: present
+
+- name: Install configfs persitently
+  ansible.builtin.shell: echo 'configfs' > /etc/modules-load.d/configfs.conf
+  changed_when: true
+
+- name: Start sys-kernel-config
+  ansible.builtin.systemd:
+    name: sys-kernel-config.mount
+    state: started
+    enabled: true
+
+- name: Unmount /mnt
+  ansible.posix.mount:
+    path: /mnt
+    state: unmounted
+
+- name: Set up kolla_logs volume
+  when: not (kolla_logs_partition is undefined)
+  block:
+    - name: Remove kolla_logs volume
+      ansible.builtin.file:
+        state: absent
+        path: /var/lib/docker/volumes/kolla_logs
+
+    - name: Link kolla_logs volume to kolla_logs_partition
+      ansible.builtin.file:
+        src: "{{ kolla_logs_partition }}"
+        dest: /var/lib/docker/volumes/kolla_logs
+        state: link

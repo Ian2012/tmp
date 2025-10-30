@@ -1,0 +1,21 @@
+---
+- name: Check designate containers
+  become: true
+  vars:
+    cacert:
+      REQUESTS_CA_BUNDLE: "{{ openstack_cacert }}"
+  kolla_container:
+    action: "compare_container"
+    common_options: "{{ docker_common_options }}"
+    environment: "{% if openstack_cacert != '' %}{{ cacert }}{% else %}{{ undefined_var | default({}) }}{% endif %}"
+    name: "{{ item.value.container_name }}"
+    image: "{{ item.value.image }}"
+    volumes: "{{ item.value.volumes | reject('equalto', '') | list }}"
+    dimensions: "{{ item.value.dimensions }}"
+    healthcheck: "{{ item.value.healthcheck | default(omit) }}"
+  when:
+    - inventory_hostname in groups[item.value.group]
+    - item.value.enabled | bool
+  with_dict: "{{ designate_services }}"
+  notify:
+    - "Restart {{ item.key }} container"

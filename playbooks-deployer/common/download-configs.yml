@@ -1,0 +1,19 @@
+---
+- name: Download configs
+  hosts: localhost
+  gather_facts: false
+  vars:
+    config_repo_path: "/tmp/whitecloud-configs"
+  tasks:
+    - name: Clone WhiteCloud configuration repository
+      ansible.builtin.git:
+        repo: "http://{{ product_config.username }}:{{ product_config.password | urlencode }}@{{ product_config.repository }}"
+        dest: "{{ config_repo_path }}"
+        version: "{{ product_config.branch }}"
+        accept_hostkey: true
+      check_mode: false
+    - name: Register config path for other playbooks
+      ansible.builtin.set_fact:
+        config_repo_path: "{{ config_repo_path }}"
+        cacheable: true
+      check_mode: false

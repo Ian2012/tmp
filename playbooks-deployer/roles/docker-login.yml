@@ -1,0 +1,2 @@
+---
+- import_playbook: "/runner/project/playbooks-deployer/common/docker-login.yml"

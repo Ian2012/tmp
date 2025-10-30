@@ -1,0 +1,41 @@
+#jinja2: trim_blocks: False
+physnet_mappings:
+{%- for host in groups['compute'] | union(groups['network']) %}
+  {{ host }}:
+  {%- if 'neutron_sriov_physnet_mappings' in hostvars[host] and 'enable_neutron_sriov' in hostvars[host] and (hostvars[host].enable_neutron_sriov | default('false') | bool) %}
+    sriov_mappings:
+  {%- for physnet, iface in ( hostvars[host].neutron_sriov_physnet_mappings | default({}) ).items() %}
+      {{ physnet }}: {{ iface }}
+  {%- endfor %}
+  {%- endif %}
+  {%- if 'ovs_dpdk_conf' in hostvars[host] and 'enable_ovs_dpdk' in hostvars[host] and (hostvars[host].enable_ovs_dpdk | default('false') | bool) and 'ovs_datapath' in hostvars[host] and hostvars[host].ovs_datapath == 'netdev' %}
+  {%- with ovs_conf = ( (hostvars[host].ovs_dpdk_conf | default({})).ovs | default({}) ) %}
+    {%- with port_mappings = (ovs_conf.port_mappings | default('')).split(',') %}
+    {%- with bridge_mappings = (ovs_conf.bridge_mappings | default('')).split(',') %}
+    dpdk_mappings:
+    {%- for bm in bridge_mappings %}
+    {%- for pm in port_mappings %}
+      {%- if bm.split(':')[1] == pm.split(':')[1] %}
+      {{ bm.split(':')[0] }}: {{ pm.split(':')[0] }} # {{ pm.split(':')[1] }}
+      {%- endif %}
+    {%- endfor %}
+    {%- endfor %}
+    {%- endwith %}
+    {%- endwith %}
+  {%- endwith %}
+  {%- endif %}
+  {%- if 'ovs_bridge_mappings' in hostvars[host] and 'ovs_port_mappings' in hostvars[host] and 'ovs_datapath' in hostvars[host] and hostvars[host].ovs_datapath == 'system' %}
+    {%- with port_mappings = (hostvars[host].ovs_port_mappings | default('')).split(',') %}
+    {%- with bridge_mappings = (hostvars[host].ovs_bridge_mappings | default('')).split(',') %}
+    bridge_mappings:
+    {%- for bm in bridge_mappings %}
+    {%- for pm in port_mappings %}
+      {%- if bm.split(':')[1] == pm.split(':')[1] %}
+      {{ bm.split(':')[0] }}: {{ pm.split(':')[0] }} # {{ pm.split(':')[1] }}
+      {%- endif %}
+    {%- endfor %}
+    {%- endfor %}
+    {%- endwith %}
+    {%- endwith %}
+  {%- endif %}
+{%- endfor %}

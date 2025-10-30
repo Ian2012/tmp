@@ -1,0 +1,103 @@
+---
+- hosts: all
+  vars:
+    logs_dir: "/tmp/logs"
+  tasks:
+    - name: Print all facts
+      copy:
+        content: "{{ hostvars[inventory_hostname] | to_nice_json }}"
+        dest: "{{ logs_dir }}/facts.json"
+
+    # NOTE(yoctozepto): this might not have been run during the
+    # regular run due to some earlier failure, yet logs content may
+    # still provide insight into that other, breaking issue
+    - name: Run check-logs.sh script
+      script: check-logs.sh
+      failed_when: false
+      when: not zuul_success | bool
+
+    - name: Run diagnostics script
+      environment:
+        CONTAINER_ENGINE: "{{ container_engine }}"
+        KOLLA_INTERNAL_VIP_ADDRESS: "{{ kolla_internal_vip_address }}"
+      script: get_logs.sh
+      register: get_logs_result
+      become: true
+      failed_when: false
+
+    - name: Print get_logs output
+      debug:
+        msg: "{{ get_logs_result.stdout }}"
+
+    - name: Download /etc/hosts file to executor
+      synchronize:
+        src: "/etc/hosts"
+        dest: "{{ zuul.executor.log_root }}/{{ inventory_hostname }}/"
+        mode: pull
+      ignore_errors: yes
+
+    - name: Dump all iptables rules
+      shell: "iptables-save > /tmp/logs/iptables"
+      args:
+        creates: /tmp/logs/iptables
+      become: true
+
+    - name: Download /tmp/logs file to executor
+      synchronize:
+        src: "/tmp/logs"
+        dest: "{{ zuul.executor.log_root }}/{{ inventory_hostname }}/"
+        mode: pull
+        rsync_opts:
+          - "--quiet"
+
+- hosts: primary
+  environment:
+    PATH: >-
+      {{ ansible_env.HOME + '/kolla-ansible-venv/bin:'
+      + ansible_env.PATH }}
+  vars:
+    ara_report_local_dir: "{{ zuul.executor.log_root }}/{{ inventory_hostname }}/ara-report"
+    kolla_ansible_local_src_dir: "{{ zuul.executor.work_root }}/src/{{ zuul.project.canonical_hostname }}/openstack/kolla-ansible"
+  tasks:
+    - name: Check for existence of ara sqlite
+      stat:
+        path: "{{ ansible_env.HOME }}/.ara/server/ansible.sqlite"
+      register: ara_stat_result
+
+    - block:
+        - name: Ensure ara-report folder existence
+          file:
+            path: "{{ ara_report_local_dir }}"
+            state: directory
+          delegate_to: localhost
+
+        - name: Download ara sqlite
+          synchronize:
+            src: "{{ ansible_env.HOME }}/.ara/server/ansible.sqlite"
+            dest: "{{ ara_report_local_dir }}/"
+            mode: pull
+
+        - name: Get ara version
+          command: "ara --version"
+          register: ara_version
+
+        - name: Template ara readme
+          template:
+            src: "{{ kolla_ansible_local_src_dir }}/tests/ara-readme.md.j2"
+            dest: "{{ ara_report_local_dir }}/README.md"
+            mode: '0644'
+          delegate_to: localhost
+
+        - name: Generate HTML from ARA database
+          command: "ara-manage generate {{ ansible_env.HOME }}/ara-html"
+          when: (zuul.change_message | default('')) is search('#ara_verbose')
+
+        - name: Download ARA HTML
+          synchronize:
+            src: "{{ ansible_env.HOME }}/ara-html"
+            dest: "{{ ara_report_local_dir }}/"
+            mode: pull
+            rsync_opts:
+              - "--quiet"
+          when: (zuul.change_message | default('')) is search('#ara_verbose')
+      when: ara_stat_result.stat.exists

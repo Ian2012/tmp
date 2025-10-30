@@ -1,0 +1,9 @@
+---
+- name: Download configuration files
+  import_playbook: download-configs.yml
+
+- name: Build kolla directory structure
+  import_playbook: build-kolla-structure.yml
+
+- name: Load environment variables
+  import_playbook: load-environment.yml

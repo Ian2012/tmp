@@ -1,0 +1,12 @@
+---
+supported_dpdk_drivers:
+  - 'uio_pci_generic'
+  - 'vfio-pci'
+  - 'igb_uio'
+
+slash: '"/"'
+
+supported_pmd_assign_algorithms:
+  - 'cycles'
+  - 'group'
+  - 'roundrobin'

@@ -1,0 +1,23 @@
+---
+- name: Find Huawei XML files
+  find:
+    paths: "{{ node_custom_config }}/cinder/huawei"
+    patterns: '(^.+\.xml$)'
+    use_regex: yes
+  delegate_to: localhost
+  register: huawei_xml_files
+
+- name: Create directories for Huawei XML files
+  become: true
+  file:
+    path: "{{ node_config_directory }}/cinder-volume/huawei"
+    state: directory
+
+- name: Copying over Huawei XML files
+  copy:
+    src: "{{ item.path }}"
+    dest: "{{ node_config_directory }}/cinder-volume/huawei/{{ item.path | basename }}"
+    mode: "0660"
+  become: true
+  with_items:
+    - "{{huawei_xml_files.files}}"

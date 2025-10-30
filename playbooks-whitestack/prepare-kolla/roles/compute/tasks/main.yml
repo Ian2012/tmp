@@ -1,0 +1,15 @@
+---
+- name: Checking swap is disabled in compute nodes
+  when: inventory_hostname in groups['compute']
+  block:
+    - name: Getting total amount of swap enabled in compute node
+      ansible.builtin.setup:
+        filter:
+          - '!all'
+          - '!min'
+          - 'ansible_swaptotal_mb'
+    - name: Checking if swap is disabled in compute node
+      delegate_to: localhost
+      ansible.builtin.fail:
+        msg: "You cannot define hosts as compute if they have swap enabled!"
+      when: validate_compute_node_swap_off | default(True) | bool and ansible_facts['swaptotal_mb']  | int  > 0

@@ -1,0 +1,278 @@
+---
+- name: Check kernel Version
+  ansible.builtin.command: 'uname -r'
+  register: kernel_version
+  changed_when: false
+
+- name: Check PMD assign algorithm
+  ansible.builtin.assert:
+    that: 'ovs_dpdk_conf.ovs.pmd_rxq_assign in supported_pmd_assign_algorithms'
+    msg: 'pmd_rxq_assign={{ ovs_dpdk_conf.ovs.pmd_rxq_assign }} not in {{ supported_pmd_assign_algorithms }}'
+  when: 'ovs_dpdk_conf.ovs.pmd_rxq_assign is defined'
+
+- name: Fail when the kernel version doesn't match the required version
+  ansible.builtin.fail:
+    msg: >
+      The current kernel version is {{ kernel_version.stdout }}, but the required kernel specified
+      is {{ ovs_dpdk_required_kernel }}. Resolve this issue by either upgrading the kernel to the
+      required version, or changing the required version.
+  when: 'kernel_version.stdout != ovs_dpdk_required_kernel'
+
+- name: Read boot parameters from /proc/cmdline
+  ansible.builtin.command: 'cat /proc/cmdline'
+  register: boot_parameters_cmd
+  changed_when: false
+
+- name: Check IOMMU is enabled as a boot parameter
+  ansible.builtin.assert:
+    that:
+      - '("intel_iommu=on" in boot_parameters_cmd.stdout) or ("amd_iommu=on" in boot_parameters_cmd.stdout)'
+    msg: 'Neither "intel_iommu=on" nor "amd_iommu=on" were found as boot parameters'
+
+- name: Check IOMMU pass-through is enabled as a boot parameter
+  ansible.builtin.assert:
+    that:
+      - '"iommu=pt" in boot_parameters_cmd.stdout'
+    msg: '"iommu=pt" was not found as a boot parameter'
+
+- name: Check hugepages size and amount are set as boot parameters
+  ansible.builtin.assert:
+    that:
+      - '"hugepages=" in boot_parameters_cmd.stdout'
+      - '"hugepagesz=" in boot_parameters_cmd.stdout'
+    msg: '"hugepages" and "hugepagesz" were not found as boot parameters'
+
+- name: Check CPU isolation from kernel is set as a boot parameter
+  ansible.builtin.assert:
+    that:
+      - '"isolcpus=" in boot_parameters_cmd.stdout'
+    msg: '"isolcpus" was not found as a boot parameter'
+
+- name: Read isolated CPUs from /proc/cmdline
+  ansible.builtin.shell:
+    cmd: 'set -o pipefail && cat /proc/cmdline | grep -oP -e "isolcpus=\K\d+(-\d+)?(,\d+(-\d+)?)*"'
+    executable: /bin/bash
+  register: isolcpus_cmd
+  changed_when: false
+
+- name: Set list of isolated CPUs
+  ansible.builtin.set_fact:
+    isolcpus: '{{ isolcpus_cmd.stdout | get_isolated_core_list_from_cmdline_output }}'
+
+- name: Read NUMA cores with lscpu
+  ansible.builtin.shell:
+    cmd: 'set -o pipefail && lscpu -p="NODE,CPU" | sort -s -n -k 1,1'
+    executable: /bin/bash
+  register: lscpu_cmd
+  changed_when: false
+
+- name: Set list of OVS and PMD cores
+  ansible.builtin.set_fact:
+    ovs_core_list: '{{ (((ovs_dpdk_conf | default({})).ovs | default({})).ovs_cores | default("1")) | get_cores_from_numa_cores(lscpu_cmd.stdout) }}'
+    pmd_core_list: '{{ (((ovs_dpdk_conf | default({})).ovs | default({})).pmd_cores | default("2")) | get_cores_from_numa_cores(lscpu_cmd.stdout) }}'
+
+- name: Check OVS cores are isolated
+  ansible.builtin.assert:
+    that:
+      - 'item in isolcpus'
+    msg: 'Specified core {{ item }} was not set inside isolcpus'
+  with_items: '{{ ovs_core_list.split(",") | map("int") | list }}'
+
+- name: Check PMD cores are isolated
+  ansible.builtin.assert:
+    that:
+      - 'item in isolcpus'
+    msg: 'Specified core {{ item }} was not set inside isolcpus'
+  with_items: '{{ pmd_core_list.split(",") | map("int") | list }}'
+
+- name: Read loaded drivers with lsmod
+  ansible.builtin.shell:
+    cmd: 'set -o pipefail && lsmod && modinfo vfio-pci || true'
+    executable: /bin/bash
+  register: lsmod_cmd
+  changed_when: false
+
+- name: Check OVS DPDK driver is loaded
+  ansible.builtin.assert:
+    that:
+      - '((((ovs_dpdk_conf | default({})).ovs | default({})).dpdk_interface_driver | default("uio_pci_generic"))) in lsmod_cmd.stdout'
+    msg: 'Driver {{ ((((ovs_dpdk_conf | default({})).ovs | default({})).dpdk_interface_driver | default("uio_pci_generic"))) }} was not loaded'
+
+- name: Check interfaces DPDK drivers are loaded
+  ansible.builtin.assert:
+    that:
+      - '(item.value.dpdk_interface_driver | default("null")) in lsmod_cmd.stdout'
+    msg: 'Driver {{ item.value.dpdk_interface_driver | default("null") }} was not loaded'
+  with_items: '{{ (ovs_dpdk_conf | default({})).interfaces | default({}) | dict2items }}'
+  when: '"members" not in item.value'
+
+- name: Check OVS DPDK drivers are supported DPDK drivers
+  ansible.builtin.assert:
+    that:
+      - '((((ovs_dpdk_conf | default({})).ovs | default({})).dpdk_interface_driver | default("uio_pci_generic"))) in supported_dpdk_drivers'
+    msg: >
+      'Driver {{ ((((ovs_dpdk_conf | default({})).ovs | default({})).dpdk_interface_driver | default("uio_pci_generic"))) }}
+      is not a supported DPDK driver ({{ supported_dpdk_drivers | join("/") }})'
+
+- name: Check interfaces DPDK drivers are supported DPDK drivers
+  ansible.builtin.assert:
+    that:
+      - '(item.value.dpdk_interface_driver | default("null")) in supported_dpdk_drivers'
+    msg: 'Driver {{ item.value.dpdk_interface_driver | default("null") }} is not a supported DPDK driver ({{ supported_dpdk_drivers | join("/") }})'
+  with_items: '{{ (ovs_dpdk_conf | default({})).interfaces | default({}) | dict2items }}'
+  when: '"members" not in item.value'
+
+- name: Check if ovsdpdk_vswitchd container is running
+  community.docker.docker_container_info:
+    name: ovsdpdk_vswitchd
+  register: ovsdpdk_vswitchd_info
+  ignore_errors: true
+
+- name: Set OVS-DPDK containers running state
+  ansible.builtin.set_fact:
+    ovsdpdk_db_is_running: >-
+      {{ ("exists" in ovsdpdk_db_info) and ovsdpdk_db_info.exists and ovsdpdk_db_info.container["State"]["Running"] }}
+    ovsdpdk_vswitchd_is_running: >-
+      {{ ("exists" in ovsdpdk_vswitchd_info) and ovsdpdk_vswitchd_info.exists and ovsdpdk_vswitchd_info.container["State"]["Running"] }}
+
+- name: Read interfaces PCI addresses
+  ansible.builtin.shell:
+    cmd: >
+      set -o pipefail && (ls -l /sys/class/net/{{ item.key }}/device 2> /dev/null || awk "/\[{{ item.key }}\]/{getline; print \$3}"
+      {{ node_config_directory }}/ovsdpdk-db/ovs-dpdkctl.conf) | awk -F"/" "{print \$NF}"
+    stdin: '{{ item.key }}'
+    executable: /bin/bash
+  register: pci_addresses_cmd
+  changed_when: false
+  with_items: '{{ (ovs_dpdk_conf | default({})).interfaces | default({}) | dict2items }}'
+  when: '"members" not in item.value'
+
+- name: Check interfaces in use by OVS (if running)
+  ansible.builtin.shell:
+    cmd: "set -o pipefail && sudo docker exec ovsdpdk_db ovs-vsctl show | grep -A 1 {{ item.key }} | awk '{print $2}' | tail -n1"
+    stdin: '{{ item.key }}'
+    executable: /bin/bash
+  register: dpdk_binded_interface
+  changed_when: false
+  with_items: '{{ (ovs_dpdk_conf | default({})).interfaces | default({}) | dict2items }}'
+  when: '"members" not in item.value and ovsdpdk_vswitchd_is_running'
+
+- name: Fail if interfaces configured for DPDK can not be found
+  ansible.builtin.fail:
+    msg: >
+      "The interface {{ item.0.item.key }} has no pci address and is not being used by OVS.
+      Check your DPDK interface configurations and make sure the interface names are correct"
+  when: >
+    item.0.changed and
+    ((not ovsdpdk_vswitchd_is_running and item.0.stdout|length == 0) or
+    (ovsdpdk_vswitchd_is_running and item.0.stdout|length == 0 and item.1.stdout != 'dpdk'))
+  with_together:
+    - '{{ pci_addresses_cmd.results }}'
+    - '{{ dpdk_binded_interface.results }}'
+  ignore_errors: '{{ ("exists" in ovsdpdk_vswitchd_info) and ovsdpdk_vswitchd_info.exists }}'
+  register: dpdk_ifaces_not_found
+
+- name: Check interface modes
+  ansible.builtin.shell:
+    cmd: "set -o pipefail && ls /sys/bus/pci/devices/{{ item.stdout }}/driver -al | awk '{n=split($NF,a,{{ slash }}); print a[n]}'"
+    executable: /bin/bash
+  register: driver
+  changed_when: false
+  with_items: '{{ pci_addresses_cmd.results }}'
+  when: '"skip_reason" not in item'
+
+- name: Fail if interfaces configured for DPDK are in the wrong mode in relation to the ovsdpdk_vswitchd container
+  ansible.builtin.fail:
+    msg: >
+      Interface {{ item.item.invocation.module_args.stdin }} is on an incorrect mode.
+      When deploying WhiteCloud with DPDK enabled, if the ovsdpdk_vswitchd container is up,
+      the configured interfaces should be in DPDK mode, otherwise they should be in kernel mode.
+      The ovsdpdk_vswitchd container is {{ 'running' if ovsdpdk_vswitchd_is_running else 'not running' }}
+      while the {{ item.item.invocation.module_args.stdin }} interface is on
+      {{ 'kernel' if item.stdout != '' else 'DPDK' }} mode
+  when: >
+    item.changed and
+    ((ovsdpdk_vswitchd_is_running and item.stdout not in supported_dpdk_drivers and item.stdout|length > 0) or
+    (not ovsdpdk_vswitchd_is_running and (item.stdout|length == 0)))
+  with_items: '{{ driver.results }}'
+
+- name: Set interfaces PCI addresses
+  ansible.builtin.set_fact:
+    dpdk_pci_addresses: '{{ dpdk_pci_addresses | default({}) | combine({item.invocation.module_args.stdin: item.stdout}) }}'
+  with_items: '{{ pci_addresses_cmd.results }}'
+  when: '"skip_reason" not in item'
+
+- name: Read /etc/netplan folder to find dpdk_tunnel_interface_address
+  ansible.builtin.find:
+    paths: '/etc/netplan'
+    contains: '.*{{ item }}\:.*'
+    pattern: '*.yml,*.yaml'
+  with_items: '{{ (tunnel_interface | default("br-ex")) }}'
+  register: find_dpdk_address_result
+
+- name: Check exactly one file in /etc/netplan has been found per interface
+  ansible.builtin.assert:
+    that:
+      - '(item.files | length) == 1'
+    msg: '{{ item.files | length }} files were found referencing {{ item.item }}, should be exactly 1'
+    quiet: true
+  loop_control:
+    label: '{{ item.item | default("") }}'
+  with_items: '{{ find_dpdk_address_result.results }}'
+
+- name: Read /etc/netplan found files
+  ansible.builtin.command:
+    cmd: 'cat {{ item.files[0].path }}'
+    stdin: '{{ item.item }}'
+  register: read_netplan_files_cmd
+  changed_when: false
+  loop_control:
+    label: '{{ item.item | default("") }}'
+  with_items: '{{ find_dpdk_address_result.results }}'
+
+- name: Configure tunnel_interface_cidr with read files data
+  ansible.builtin.set_fact:
+    tunnel_interface_cidr: >-
+      {{ (tunnel_interface_cidr | default([])) + [item.stdout |
+      get_address_from_netplan_file_content(item.invocation.module_args.stdin) | ipaddr("host/prefix")] }}
+  with_items: '{{ read_netplan_files_cmd.results }}'
+
+- name: Set OVS port, bridge and CIDR mappings
+  ansible.builtin.set_fact:
+    ovs_port_mappings: >-
+      {% for bridge in neutron_bridge_name.split(",") %}{{ neutron_external_interface.split(",")[loop.index0]
+      }}:{{ bridge }}{% if not loop.last %},{% endif %}{% endfor %}
+    ovs_bridge_mappings: >-
+      {% for bridge in neutron_bridge_name.split(",") %}physnet{{ loop.index0 + 1 }}:{{ bridge }}{% if not loop.last %},{% endif %}{% endfor %}
+    ovs_cidr_mappings: >-
+      {{ (tunnel_interface | default("br-ex")) }}:{{ tunnel_interface_cidr[0] }}
+  when: >
+    ((ovs_dpdk_conf | default({})).port_mappings is undefined) or
+    ((ovs_dpdk_conf | default({})).bridge_mappings is undefined) or
+    ((ovs_dpdk_conf | default({})).cidr_mappings is undefined)
+
+- name: Create ovsdpdk-db configuration folder
+  ansible.builtin.file:
+    path: '{{ node_config_directory }}/ovsdpdk-db'
+    state: directory
+    recurse: true
+
+- name: Create OVS-DPDK configuration file
+  ansible.builtin.template:
+    src: ovs-dpdkctl.conf.j2
+    dest: '{{ node_config_directory }}/ovsdpdk-db/ovs-dpdkctl.conf'
+    mode: '640'
+
+- name: Execute ovs-dpdkctl.sh init
+  ansible.builtin.command: >
+    docker exec ovsdpdk_db /bin/sh -c
+    'CONFIG_FILE={{ container_config_directory }}/ovs-dpdkctl.conf {{ container_config_directory }}/ovs-dpdkctl.sh init_ovs_db'
+  register: status
+  changed_when: status.stdout.find('changed') != -1
+  when:
+    - (inventory_hostname in groups['compute']
+       or inventory_hostname in groups['neutron-dhcp-agent']
+       or inventory_hostname in groups['neutron-l3-agent']
+       or inventory_hostname in groups['neutron-metadata-agent'])
+    - ovsdpdk_db_is_running
+    - ovsdpdk_vswitchd_is_running

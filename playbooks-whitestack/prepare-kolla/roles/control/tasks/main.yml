@@ -1,0 +1,56 @@
+---
+#
+# Gluster client installation
+#
+- name: Install Gluster client and mount volume
+  when: enable_glance_ha_gluster and groups['storage'] | length >= 3
+  block:
+    - name: Install GlusterFS client
+      ansible.builtin.apt:
+        name: glusterfs-client
+        state: present
+        lock_timeout: "{{ apt_lock_timeout }}"
+      register: apt_install
+      retries: "{{ apt_retries_amount }}"
+      delay: "{{ apt_retries_delay }}"
+      until: apt_install is success
+
+    - name: Ensure Gluster brick and mount directories exist.
+      ansible.builtin.file:
+        path: "{{ glance_file_datadir_volume }}"
+        state: directory
+        mode: '755'
+
+    - name: Ensure Gluster volume is mounted.
+      ansible.posix.mount:
+        path: "{{ glance_file_datadir_volume }}"
+        src: "{{ hostvars[groups['storage'][0]].ansible_host }}:/glance"
+        fstype: glusterfs
+        opts: "defaults,_netdev"
+        state: mounted
+
+- name: Checking swap is disabled in control nodes
+  when: inventory_hostname in groups['control']
+  block:
+    - name: Getting total amount of swap enabled in control node
+      ansible.builtin.setup:
+        filter:
+          - '!all'
+          - '!min'
+          - 'ansible_swaptotal_mb'
+    - name: Checking if swap is enabled in control node
+      delegate_to: localhost
+      ansible.builtin.fail:
+        msg: "You cannot define hosts as control if they have swap enabled!"
+      when: ansible_facts['swaptotal_mb']  | int  > 0
+
+- name: Checking connectivity to Keystone identity providers
+  when: inventory_hostname in groups['control'] and keystone_identity_providers is defined
+  block:
+    - name: Connecting to Keycloak hosts
+      ansible.builtin.uri:
+        url: "{{ item.identifier }}"
+        validate_certs: false
+        timeout: 10
+        status_code: [200, 202, 204]
+      loop: "{{ keystone_identity_providers }}"

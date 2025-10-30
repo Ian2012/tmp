@@ -1,0 +1,24 @@
+#
+# This playbook executes additional tasks on target hosts after Kolla deployment
+#
+---
+- name: Post Kolla
+  hosts: all
+  become: true
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Manage Docker as a non-root user
+      when: enable_docker_without_sudo
+      block:
+        - name: Ensure group docker exists
+          ansible.builtin.group:
+            name: docker
+            state: present
+
+        - name: Add user to docker group
+          ansible.builtin.user:
+            name: "{{ ansible_user }}"
+            groups: docker
+            append: true

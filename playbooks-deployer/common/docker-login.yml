@@ -1,0 +1,20 @@
+---
+- name: Docker GCR Authentication
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Copy license to hosts
+      ansible.builtin.copy:
+        src: "/tmp/whitecloud-configs/license.json"
+        dest: "/tmp/license.json"
+        mode: preserve
+      check_mode: false
+
+    - name: Docker login to GCR using license.json
+      ansible.builtin.shell: |
+        set -o pipefail
+        cat /tmp/license.json | docker login -u _json_key --password-stdin https://gcr.io
+      register: docker_login_result
+      check_mode: false
+      changed_when: docker_login_result.rc == 0

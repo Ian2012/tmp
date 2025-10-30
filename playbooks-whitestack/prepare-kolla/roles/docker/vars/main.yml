@@ -1,0 +1,10 @@
+---
+docker_apt_remove_old:
+  - docker
+  - docker-engine
+  - docker.io
+
+docker_apt_dependencies:
+  - ca-certificates
+  - curl
+  - apt-transport-https

@@ -1,0 +1,2 @@
+---
+- import_playbook: "/runner/project/playbooks-upstream/kolla-ansible/ansible/post-deploy.yml"

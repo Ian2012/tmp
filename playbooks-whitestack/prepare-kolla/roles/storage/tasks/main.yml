@@ -1,0 +1,99 @@
+---
+#
+# Unmount /mnt
+#
+- name: Unmount /mnt
+  ansible.posix.mount:
+    path: /mnt
+    state: unmounted
+
+#
+# Set up Cinder storage
+#
+- name: Create Cinder VolumeGroup
+  community.general.lvg:
+    vg: cinder-volumes
+    pvs: "{{ cinder_volume_device }}"
+    state: present
+  when: (enable_cinder is not undefined) and (enable_cinder | bool) and (cinder_volume_device is not undefined)
+
+#
+# Set up Swift storage
+#
+- name: Set up Swift storage
+  when: (enable_swift is not undefined) and (enable_swift | bool) and (swift_volume_device is not undefined)
+  block:
+    - name: Create Swift VolumeGroup
+      community.general.lvg:
+        vg: swift-volumes
+        pvs: "{{ swift_volume_device }}"
+        state: present
+
+    - name: Create Swift LogicalVolumes
+      community.general.lvol:
+        vg: swift-volumes
+        lv: "{{ item }}"
+        size: 33%VG
+      with_items:
+        - d0
+        - d1
+        - d2
+
+    - name: Filesystem for Swift LogicalVolumes
+      community.general.filesystem:
+        fstype: xfs
+        dev: "/dev/swift-volumes/{{ item }}"
+        opts: "-L swift_{{ item }}"
+      with_items:
+        - d0
+        - d1
+        - d2
+
+#
+# Set up Gluster storage
+#
+- name: Gluster installation and volume creation
+  when: enable_glance_ha_gluster and groups['storage'] | length >= 3
+  block:
+    - name: Install Gluster
+      ansible.builtin.apt:
+        name: glusterfs-server
+        state: present
+        lock_timeout: "{{ apt_lock_timeout }}"
+      register: apt_install
+      retries: "{{ apt_retries_amount }}"
+      delay: "{{ apt_retries_delay }}"
+      until: apt_install is success
+
+    - name: Start gluster
+      ansible.builtin.systemd:
+        state: started
+        name: glusterd
+        enabled: true
+
+    - name: Create a trusted storage pool
+      gluster.gluster.gluster_peer:
+        state: present
+        nodes: "{{ groups['storage'][:3] | map('extract', hostvars, ['ansible_host']) | list }}"
+      run_once: true
+
+    - name: Ensure Gluster brick and mount directories exist.
+      ansible.builtin.file:
+        path: "{{ gluster_brick_dir }}"
+        state: directory
+        mode: '775'
+
+    - name: Create Gluster volume
+      gluster.gluster.gluster_volume:
+        state: present
+        name: glance
+        bricks: "{{ gluster_brick_dir }}"
+        replicas: 3
+        cluster: "{{ groups['storage'][:3] | map('extract', hostvars, ['ansible_host']) | list }}"
+        force: true
+      run_once: true
+
+    - name: Start Gluster volume
+      gluster.gluster.gluster_volume:
+        state: started
+        name: glance

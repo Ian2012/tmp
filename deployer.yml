@@ -1,0 +1,30 @@
+---
+- name: WhiteCloud Deployer
+  hosts: localhost
+  gather_facts: false
+  tags: [always]
+  tasks:
+    - name: Show selected action
+      debug:
+        msg: "Running WhiteCloud deployer with action: {{ deployer_action }}"
+      check_mode: false
+
+    - name: Validate deployer_action playbook exists
+      assert:
+        that:
+          - lookup('file', 'playbooks-deployer/roles/' + deployer_action + '.yml', errors='ignore') != ''
+        fail_msg: "Playbook 'playbooks-deployer/roles/{{ deployer_action }}.yml' does not exist. Please check your deployer_action value."
+        success_msg: "Playbook validation passed for action: {{ deployer_action }}"
+      run_once: true
+      check_mode: false
+
+    - name: Add FQDN to /etc/hosts
+      shell: echo "{{ kolla_internal_vip_address }} {{ kolla_internal_fqdn }}" >> /etc/hosts
+      become: yes
+      when: kolla_internal_fqdn is defined
+      check_mode: false
+
+- import_playbook: playbooks-deployer/common/common.yml
+  tags: [always]
+
+- import_playbook: "playbooks-deployer/roles/{{ deployer_action }}.yml"

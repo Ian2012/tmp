@@ -1,0 +1,66 @@
+---
+- name: Read boot parameters from /proc/cmdline
+  ansible.builtin.command: 'cat /proc/cmdline'
+  register: boot_parameters_cmd
+  changed_when: false
+
+- name: Check IOMMU is enabled as a boot parameter
+  ansible.builtin.assert:
+    that:
+      - '("intel_iommu=on" in boot_parameters_cmd.stdout) or ("amd_iommu=on" in boot_parameters_cmd.stdout)'
+    msg: 'Neither "intel_iommu=on" nor "amd_iommu=on" were found as boot parameters'
+
+- name: Check IOMMU pass-through is enabled as a boot parameter
+  ansible.builtin.assert:
+    that:
+      - '"iommu=pt" in boot_parameters_cmd.stdout'
+    msg: '"iommu=pt" was not found as a boot parameter'
+
+- name: Read BIOS flags from /proc/cpuinfo
+  ansible.builtin.command: 'cat /proc/cpuinfo'
+  register: bios_flags_cmd
+  changed_when: false
+
+- name: Check VT is enabled as a BIOS flag
+  ansible.builtin.assert:
+    that:
+      - '("svm" in bios_flags_cmd.stdout) or ("vmx" in bios_flags_cmd.stdout)'
+    msg: 'Neither "svm" nor "vmx" were found as BIOS flags'
+
+- name: Read SR-IOV interfaces capabilities
+  ansible.builtin.shell:
+    cmd: 'set -o pipefail && ls -l /sys/class/net/{{ item.value }}/device | awk -F"/" "{print \$NF}" | xargs lspci -vs'
+    stdin: '{{ item.value }}'
+    executable: /bin/bash
+  register: interfaces_capabilities_cmd
+  with_items: '{{ neutron_sriov_physnet_mappings | default({}) | dict2items }}'
+  changed_when: false
+
+- name: Check SR-IOV is enabled as an interface capability
+  ansible.builtin.assert:
+    that:
+      - '"SR-IOV" in item.stdout'
+    msg: 'SR-IOV is not enabled for interface {{ item.invocation.module_args.stdin }}'
+    quiet: true
+  with_items: '{{ interfaces_capabilities_cmd.results }}'
+  loop_control:
+    label: '{{ item.invocation.module_args.stdin | default("") }}'
+
+- name: Read SR-IOV interfaces enabled VFs amount
+  ansible.builtin.shell:
+    cmd: 'set -o pipefail && cat /sys/class/net/{{ item.value }}/device/sriov_numvfs || echo "0"'
+    stdin: '{{ item.value }}'
+    executable: /bin/bash
+  register: interfaces_vfs_cmd
+  with_items: '{{ neutron_sriov_physnet_mappings | default({}) | dict2items }}'
+  changed_when: false
+
+- name: Check SR-IOV interfaces enabled VFs amount is greater than zero
+  ansible.builtin.assert:
+    that:
+      - '(item.stdout | int) > 0'
+    msg: 'SR-IOV VFs amount is not greater than zero for interface {{ item.invocation.module_args.stdin }}'
+    quiet: true
+  with_items: '{{ interfaces_vfs_cmd.results }}'
+  loop_control:
+    label: '{{ item.invocation.module_args.stdin | default("") }}'

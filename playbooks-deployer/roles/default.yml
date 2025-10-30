@@ -1,0 +1,24 @@
+---
+- import_playbook: "/runner/project/playbooks-whitestack/prepare-kolla/prepare-kolla.yml"
+
+- import_playbook: "/runner/project/playbooks-whitestack/configure-dataplane/configure_dataplane.yml"
+
+- import_playbook: "/runner/project/playbooks-upstream/kolla-ansible/ansible/kolla-host.yml"
+
+- import_playbook: "/runner/project/playbooks-deployer/common/docker-login.yml"
+
+- import_playbook: "/runner/project/playbooks-upstream/kolla-ansible/ansible/site.yml"
+  vars:
+    kolla_action: precheck
+...
+
+- import_playbook: "/runner/project/playbooks-upstream/kolla-ansible/ansible/site.yml"
+  vars:
+    kolla_action: deploy
+...
+
+- import_playbook: "/runner/project/playbooks-upstream/kolla-ansible/ansible/post-deploy.yml"
+
+- import_playbook: "/runner/project/playbooks-whitestack/post-kolla/post-kolla.yml"
+
+- import_playbook: "/runner/project/playbooks-whitestack/prepare-environment/prepare-environment.yml"
